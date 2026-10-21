@@ -34,6 +34,8 @@ class CodecBase:
 
     # 可选:参数名 -> [(下拉显示文本, 实际值), ...]。声明后 UI 用下拉框渲染。
     param_choices: ClassVar[dict[str, list[tuple[str, str]]]] = {}
+    # 可选:这些参数用复选框渲染,取值 "1"/"0"。
+    param_bool: ClassVar[set[str]] = set()
 
     registry: ClassVar[list["CodecBase"]] = []
 

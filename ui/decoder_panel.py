@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -75,7 +76,7 @@ class DecoderPanel(QWidget):
         form.addRow(self.iv_label, self.iv_edit)
         form.addRow(self.alphabet_label, self.alphabet_edit)
         # 动态参数行(按算法 params 声明重建)
-        self._dyn_rows: list[tuple[QLabel, QWidget]] = []
+        self._dyn_rows: list[tuple[QLabel | None, QWidget]] = []
         self._dyn_form = form
         layout.addWidget(self.param_box)
 
@@ -143,15 +144,27 @@ class DecoderPanel(QWidget):
 
     def _rebuild_dynamic_params(self, codec: CodecBase) -> None:
         for label, edit in self._dyn_rows:
-            self._dyn_form.removeRow(label)
+            if label is None:
+                self._dyn_form.removeRow(edit)
+            else:
+                self._dyn_form.removeRow(label)
         self._dyn_rows.clear()
         self._param_edits.clear()
         choices_map = getattr(codec, "param_choices", {})
+        bool_params = getattr(codec, "param_bool", set())
         for name, label_text, default in codec.params:
+            if name in bool_params:
+                edit: QWidget = QCheckBox(label_text)
+                edit.setChecked(str(default).strip().lower()
+                                not in ("0", "false", "no", "off", ""))
+                self._dyn_form.addRow(edit)
+                self._dyn_rows.append((None, edit))
+                self._param_edits[name] = edit
+                continue
             label = QLabel(label_text + ":")
             choices = choices_map.get(name)
             if choices:
-                edit: QWidget = QComboBox()
+                edit = QComboBox()
                 for text, value in choices:
                     edit.addItem(text, value)
                 index = edit.findData(default)
@@ -171,6 +184,8 @@ class DecoderPanel(QWidget):
                 params[name] = "" if data is None else str(data)
             elif isinstance(widget, QLineEdit):
                 params[name] = widget.text()
+            elif isinstance(widget, QCheckBox):
+                params[name] = "1" if widget.isChecked() else "0"
         return params
 
     # ---------------- 编解码操作 ----------------

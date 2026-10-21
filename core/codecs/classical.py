@@ -98,6 +98,64 @@ class VigenereCodec(CodecBase):
         return self._run(text, key, decrypt=True)
 
 
+class AffineCodec(CodecBase):
+    name = "仿射密码"
+    category = "古典密码"
+    description = "仿射密码 E(x)=(a*x+b) mod 26; a 必须与 26 互素; 默认保留标点与大小写"
+    detectable = False
+    params = [
+        ("a", "a(必须与26互素)", "5"),
+        ("b", "b(0~25)", "8"),
+        ("remove_punctuation", "移除标点 (Remove Punctuation)", "0"),
+    ]
+    param_choices = {
+        "a": [(str(v), str(v)) for v in (1, 3, 5, 7, 9, 11, 15, 17, 19, 21, 23, 25)],
+        "b": [(str(v), str(v)) for v in range(26)],
+    }
+    param_bool = {"remove_punctuation"}
+
+    def _parse_key(self, params: dict) -> tuple[int, int]:
+        try:
+            a = int(str(params.get("a", "5")).strip())
+            b = int(str(params.get("b", "8")).strip())
+        except ValueError:
+            raise CodecError("仿射密码的 a、b 必须是整数")
+        if a not in (1, 3, 5, 7, 9, 11, 15, 17, 19, 21, 23, 25):
+            raise CodecError("a 必须与 26 互素,可选 1,3,5,7,9,11,15,17,19,21,23,25")
+        if not 0 <= b <= 25:
+            raise CodecError("b 必须在 0~25 之间")
+        return a, b
+
+    def _run(self, text: str, a: int, b: int, decrypt: bool,
+             remove_punctuation: bool) -> str:
+        inv = pow(a, -1, 26)
+        out = []
+        for ch in text:
+            if "a" <= ch <= "z":
+                base, upper = 97, False
+            elif "A" <= ch <= "Z":
+                base, upper = 65, True
+            else:
+                if not remove_punctuation:
+                    out.append(ch)
+                continue
+            x = ord(ch) - base
+            y = (inv * (x - b)) % 26 if decrypt else (a * x + b) % 26
+            ch = chr(y + base)
+            out.append(ch.upper() if upper else ch.lower())
+        return "".join(out)
+
+    def encode(self, text: str, **params) -> str:
+        a, b = self._parse_key(params)
+        return self._run(text, a, b, False,
+                         _bool_param(params, "remove_punctuation", False))
+
+    def decode(self, text: str, **params) -> str:
+        a, b = self._parse_key(params)
+        return self._run(text, a, b, True,
+                         _bool_param(params, "remove_punctuation", False))
+
+
 class RailFenceCodec(CodecBase):
     name = "栅栏密码"
     category = "古典密码"
@@ -423,36 +481,102 @@ class MorseCodec(CodecBase):
 class PigpenCodec(CodecBase):
     name = "猪圈密码"
     category = "古典密码"
-    description = "猪圈密码的 Unicode 符号近似表示;图片题请对照图形"
+    description = (
+        "猪圈密码(浏览器近似符号);支持斜杠/空格/不分隔三种符号分隔,"
+        "以及是否保留非字母字符"
+    )
+    params = [
+        ("separator", "符号分隔", "/"),
+        ("keep_nonletters", "保留非字母字符", "0"),
+    ]
+    param_choices = {
+        "separator": [
+            ("斜杠 /", "/"),
+            ("空格", " "),
+            ("不分隔", ""),
+        ],
+    }
+    param_bool = {"keep_nonletters"}
 
-    _GRID1 = ["┘", "┴", "└", "┤", "┼", "├", "┐", "┬", "┌"]       # A-I
-    _GRID2 = [g + "∙" for g in _GRID1]                          # J-R
-    _X1 = ["⋀", "⋁", "<", ">"]                                   # S-V
-    _X2 = [x + "∙" for x in _X1]                                 # W-Z
-    _TABLE = {chr(65 + i): sym for i, sym in enumerate(_GRID1 + _GRID2 + _X1 + _X2)}
+    # 与截图中的浏览器工具保持一致的符号(实测)
+    _TABLE = {
+        "A": "┌", "B": "┬", "C": "└",
+        "D": "Ɔ", "E": "□", "F": "Ɛ",
+        "G": "┘", "H": "┴", "I": "┐",
+        "J": "┌•", "K": "┬•", "L": "└•",
+        "M": "Ɔ•", "N": "□•", "O": "Ɛ•",
+        "P": "┘•", "Q": "┴•", "R": "┐•",
+        "S": "∧", "T": ">", "U": "<", "V": "∨",
+        "W": "∨•", "X": "∧•", "Y": "<•", "Z": ">•",
+    }
 
-    def encode(self, text: str, **p) -> str:
-        out = []
+    @staticmethod
+    def _separator(params: dict) -> str:
+        raw = params.get("separator", "/")
+        if raw in ("/", "斜杠", "斜杠 /"):
+            return "/"
+        if raw in (" ", "空格", "space"):
+            return " "
+        if raw in ("", "不分隔", "none", "无"):
+            return ""
+        raise CodecError("符号分隔仅支持 斜杠 /、空格 或 不分隔")
+
+    def encode(self, text: str, **params) -> str:
+        sep = self._separator(params)
+        keep = _bool_param(params, "keep_nonletters", False)
+        tokens = []
         for ch in text.upper():
             if ch in self._TABLE:
-                out.append(self._TABLE[ch])
-            elif ch == " ":
-                out.append("/")
-            else:
-                raise CodecError(f"猪圈密码仅支持英文字母,遇到:{ch!r}")
-        return " ".join(out)
-
-    def decode(self, text: str, **p) -> str:
-        rev = {v: k for k, v in self._TABLE.items()}
-        tokens = text.strip().split()
+                tokens.append(self._TABLE[ch])
+            elif keep:
+                tokens.append(ch)
         if not tokens:
             return ""
+        return sep.join(tokens)
+
+    def decode(self, text: str, **params) -> str:
+        sep = self._separator(params)
+        keep = _bool_param(params, "keep_nonletters", False)
+        rev = {}
+        for ch, sym in self._TABLE.items():
+            rev.setdefault(sym, ch)
+            # 兼容用中点/句点表示的点
+            rev.setdefault(sym.replace("•", "·"), ch)
+            rev.setdefault(sym.replace("•", "."), ch)
+        if not text:
+            return ""
+
+        if sep:
+            parts = text.split(sep)
+            out = []
+            for part in parts:
+                token = part.strip() if sep == " " else part
+                if not token:
+                    if keep and part:
+                        out.append(part)
+                    continue
+                if token in rev:
+                    out.append(rev[token])
+                elif keep:
+                    out.append(token)
+                else:
+                    raise CodecError(f"无法识别的猪圈符号:{token!r}")
+            return "".join(out)
+
+        # 不分隔:按最长符号贪心匹配
+        symbols = sorted(rev, key=len, reverse=True)
         out = []
-        for tok in tokens:
-            if tok == "/":
-                out.append(" ")
-            elif tok in rev:
-                out.append(rev[tok])
+        i = 0
+        while i < len(text):
+            for sym in symbols:
+                if text.startswith(sym, i):
+                    out.append(rev[sym])
+                    i += len(sym)
+                    break
             else:
-                raise CodecError(f"无法识别的猪圈符号:{tok!r}")
+                if keep:
+                    out.append(text[i])
+                    i += 1
+                else:
+                    raise CodecError(f"无法识别的猪圈符号:{text[i]!r}")
         return "".join(out)

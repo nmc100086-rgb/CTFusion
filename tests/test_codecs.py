@@ -181,6 +181,59 @@ class CodecRoundTripTests(unittest.TestCase):
         wells = "..-. .-.. .- --. .--.- .-- . .-.. -.-. --- -- . .--.--"
         self.assertEqual(morse.decode(wells), "flag{welcome}")
 
+    def test_affine_cipher(self):
+        affine = codec("仿射密码")
+        # 经典向量:a=5,b=8
+        self.assertEqual(affine.encode("AFFINECIPHER", a="5", b="8"), "IHHWVCSWFRCP")
+        self.assertEqual(affine.decode("IHHWVCSWFRCP", a="5", b="8"), "AFFINECIPHER")
+        # 默认保留标点和大小写
+        plaintext = "flag{welcome come to ctf}"
+        encoded = affine.encode(plaintext, a="5", b="8", remove_punctuation="0")
+        self.assertEqual(encoded, "hlim{oclsaqc saqc za szh}")
+        self.assertEqual(affine.decode(encoded, a="5", b="8", remove_punctuation="0"),
+                         plaintext)
+        # 移除标点后只剩字母
+        stripped = affine.encode(plaintext, a="5", b="8", remove_punctuation="1")
+        self.assertEqual(stripped, "hlimoclsaqcsaqczaszh")
+        self.assertEqual(affine.decode(stripped, a="5", b="8",
+                                       remove_punctuation="1"),
+                         "flagwelcomecometoctf")
+        with self.assertRaisesRegex(Exception, "互素"):
+            affine.encode("ABC", a="2", b="8")
+
+    def test_atbash_renamed(self):
+        self.assertEqual(codec("Atbash").encode("Hello"), "Svool")
+        with self.assertRaises(KeyError):
+            codec("放射密码")
+
+    def test_pigpen_browser_mapping_and_separators(self):
+        pigpen = codec("猪圈密码")
+        expected = "Ɛ/└•/┌/┘/∨•/□/└•/└/Ɛ•/Ɔ•/□/└/Ɛ•/Ɔ•/□/>/Ɛ•/└/>/Ɛ"
+        encoded = pigpen.encode("flag{welcome come to ctf}", separator="/",
+                                keep_nonletters="0")
+        self.assertEqual(encoded, expected)
+        self.assertEqual(
+            pigpen.decode(expected, separator="/", keep_nonletters="0"),
+            "FLAGWELCOMECOMETOCTF",
+        )
+        # 空格分隔
+        self.assertEqual(
+            pigpen.encode("HELLO", separator=" ", keep_nonletters="0"),
+            "┴ □ └• └• Ɛ•",
+        )
+        # 不分隔
+        compact = pigpen.encode("HELLO", separator="", keep_nonletters="0")
+        self.assertEqual(compact, "┴□└•└•Ɛ•")
+        self.assertEqual(pigpen.decode(compact, separator="", keep_nonletters="0"),
+                         "HELLO")
+        # 保留非字母
+        with_marks = pigpen.encode("flag{welcome}", separator="/",
+                                   keep_nonletters="1")
+        self.assertEqual(
+            pigpen.decode(with_marks, separator="/", keep_nonletters="1"),
+            "FLAG{WELCOME}",
+        )
+
     def test_rail_fence_standard_and_w(self):
         fence = codec("栅栏密码")
         # W 型:之字形

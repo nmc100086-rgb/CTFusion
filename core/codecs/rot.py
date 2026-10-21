@@ -1,4 +1,4 @@
-"""ROT13 与放射密码(Atbash):均为自逆变换。"""
+"""ROT13 与 Atbash:均为自逆变换。"""
 
 from __future__ import annotations
 
@@ -23,9 +23,9 @@ class Rot13Codec(CodecBase):
 
 
 class AtbashCodec(CodecBase):
-    name = "放射密码"
+    name = "Atbash"
     category = "古典密码"
-    description = "Atbash:字母表首尾互换(A<->Z),自逆"
+    description = "Atbash(反字母表,旧称放射密码):字母表首尾互换(A<->Z),自逆"
 
     _TABLE = str.maketrans(
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",

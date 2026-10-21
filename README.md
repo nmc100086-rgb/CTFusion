@@ -1,10 +1,10 @@
 # MiscKit — CTF Misc 桌面工具箱
 
-一个基于 **PySide6** 的本地 CTF 杂项题辅助工具。当前版本已完成「编码解码」工作台，内置 **34 种**编解码算法，并支持一键多层链式智能解码；文件分析与图片隐写、ZIP 破解两个页签为后续规划。
+一个基于 **PySide6** 的本地 CTF 杂项题辅助工具。当前版本已完成「编码解码」工作台，内置 **35 种**编解码算法，并支持一键多层链式智能解码；文件分析与图片隐写、ZIP 破解两个页签为后续规划。
 
 ## 功能特性
 
-- **34 种算法**，按「Base 家族 / 古典密码 / 哈希 / 对称密码 / 文本编码 / 趣味编码 / 进制 / 隐写编码」分类
+- **35 种算法**，按「Base 家族 / 古典密码 / 哈希 / 对称密码 / 文本编码 / 趣味编码 / 进制 / 隐写编码」分类
 - **动态参数区**：密钥、IV、自定义字母表、算法专属参数（如凯撒偏移量、栅栏栏数、AES 模式）随算法自动显隐
 - **一键智能解码**：多层 BFS 链式尝试，自动识别套娃编码并给出 Top N 结果
 - **单向算法保护**：MD5 等不可逆算法自动禁用解码按钮
@@ -30,7 +30,7 @@ MiscKit/
         ├── __init__.py          # 导入实现模块 → 自动注册
         ├── base.py              # CodecBase 统一接口 + 可读性评分
         ├── bases.py             # Base16/32/45/58/62/64/85/Ascii85/91/92
-        ├── classical.py         # 凯撒/维吉尼亚/栅栏/曲路/培根/摩斯/猪圈/ROT13/Atbash/Hill
+        ├── classical.py         # 凯撒/仿射/维吉尼亚/栅栏/曲路/培根/摩斯/猪圈/ROT13/Atbash/Hill
         ├── symmetric.py         # AES(ECB/CBC)、RC4
         ├── text_enc.py          # Hex/URL/ASCII/Quoted-printable/进制转换
         ├── uue.py               # UUencode / XXencode
@@ -63,12 +63,12 @@ python main.py
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-## 支持的算法（34 种）
+## 支持的算法（35 种）
 
 | 分类 | 算法 |
 |---|---|
 | Base 家族（10） | Base16、Base32、Base45、Base58、Base62、Base64、Base85、Ascii85、Base91、Base92 |
-| 古典密码（10） | 凯撒密码、ROT13、Atbash、维吉尼亚、栅栏密码、曲路密码、培根密码、摩斯电码、猪圈密码、Hill 密码 |
+| 古典密码（11） | 凯撒密码、仿射密码、ROT13、Atbash、维吉尼亚、栅栏密码、曲路密码、培根密码、摩斯电码、猪圈密码、Hill 密码 |
 | 文本编码（6） | Hex、URL 编码、ASCII 码、Quoted-printable、UUencode、XXencode |
 | 趣味编码（3） | Brainfuck、Ook!、JSFuck |
 | 对称密码（2） | AES（ECB / CBC）、RC4 |

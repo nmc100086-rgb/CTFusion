@@ -19,11 +19,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit
+    from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QLineEdit
 
     from ui.main_window import MainWindow
 except ImportError:  # pragma: no cover - 没装 PySide6 时跳过
     QApplication = None  # type: ignore[assignment]
+    QCheckBox = None  # type: ignore[assignment]
     QComboBox = None  # type: ignore[assignment]
     QLineEdit = None  # type: ignore[assignment]
     MainWindow = None  # type: ignore[assignment]
@@ -119,6 +120,50 @@ class DecoderPanelSmokeTests(unittest.TestCase):
         self.select("摩斯电码")
         self.assertIsInstance(self.panel._param_edits["letter_case"], QComboBox)
         self.assertIsInstance(self.panel._param_edits["restore_spaces"], QComboBox)
+        self.select("猪圈密码")
+        self.assertIsInstance(self.panel._param_edits["separator"], QComboBox)
+        self.assertIsInstance(self.panel._param_edits["keep_nonletters"], QCheckBox)
+
+    def test_pigpen_ui(self):
+        self.select("猪圈密码")
+        separator = self.panel._param_edits["separator"]
+        separator.setCurrentIndex(separator.findData("/"))
+        self.panel.input_edit.setPlainText("flag{welcome come to ctf}")
+        self.panel._on_encode()
+        self.assertEqual(
+            self.panel.output_edit.toPlainText(),
+            "Ɛ/└•/┌/┘/∨•/□/└•/└/Ɛ•/Ɔ•/□/└/Ɛ•/Ɔ•/□/>/Ɛ•/└/>/Ɛ",
+        )
+
+        separator.setCurrentIndex(separator.findData(" "))
+        self.panel.input_edit.setPlainText("HELLO")
+        self.panel._on_encode()
+        self.assertEqual(self.panel.output_edit.toPlainText(), "┴ □ └• └• Ɛ•")
+
+    def test_affine_ui(self):
+        self.select("仿射密码")
+        a_widget = self.panel._param_edits["a"]
+        b_widget = self.panel._param_edits["b"]
+        remove_widget = self.panel._param_edits["remove_punctuation"]
+        self.assertIsInstance(a_widget, QComboBox)
+        self.assertIsInstance(b_widget, QComboBox)
+        self.assertIsInstance(remove_widget, QCheckBox)
+        a_widget.setCurrentIndex(a_widget.findData("5"))
+        b_widget.setCurrentIndex(b_widget.findData("8"))
+        self.panel.input_edit.setPlainText("flag{welcome come to ctf}")
+        self.panel._on_encode()
+        self.assertEqual(self.panel.output_edit.toPlainText(),
+                         "hlim{oclsaqc saqc za szh}")
+        self.panel.input_edit.setPlainText("hlim{oclsaqc saqc za szh}")
+        self.panel._on_decode()
+        self.assertEqual(self.panel.output_edit.toPlainText(),
+                         "flag{welcome come to ctf}")
+
+        remove_widget.setChecked(True)
+        self.panel.input_edit.setPlainText("flag{welcome come to ctf}")
+        self.panel._on_encode()
+        self.assertEqual(self.panel.output_edit.toPlainText(),
+                         "hlimoclsaqcsaqczaszh")
 
     def test_morse_ui_braces_and_lowercase(self):
         self.select("摩斯电码")
