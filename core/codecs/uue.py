@@ -41,7 +41,7 @@ class UueCodec(CodecBase):
 class XueCodec(CodecBase):
     name = "XXencode"
     category = "文本编码"
-    description = "结构与 UUencode 相同,使用 +-0-9A-Za-z 字母表"
+    description = "XXencode,使用 +-0-9A-Za-z 字母表;兼容浏览器版(长度标记也用该字母表)"
     ALXX = "+-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
     def encode(self, text: str, **p) -> str:
@@ -49,7 +49,8 @@ class XueCodec(CodecBase):
         lines = []
         for i in range(0, len(data), 45):
             chunk = data[i:i + 45]
-            line = [chr(len(chunk) + 32)]
+            # 浏览器版:长度也用 XXencode 字母表表示(不是 ASCII+32)
+            line = [self.ALXX[len(chunk)]]
             for j in range(0, len(chunk), 3):
                 g = chunk[j:j + 3].ljust(3, b"\x00")
                 n = (g[0] << 16) | (g[1] << 8) | g[2]
@@ -58,6 +59,34 @@ class XueCodec(CodecBase):
             lines.append("".join(line))
         return "\n".join(lines)
 
+    def _line_length(self, raw: str) -> int:
+        """识别浏览器版/旧版两种长度标记。
+
+        浏览器版: marker = ALXX[长度];
+        旧版:     marker = chr(长度 + 32)。
+        用“数据长度是否正好等于该长度所需”来消除歧义。
+        """
+        body_len = len(raw) - 1
+        candidates: list[int] = []
+
+        if raw[0] in self.ALXX:
+            n = self.ALXX.index(raw[0])
+            if 1 <= n <= 45 and body_len >= ((n + 2) // 3) * 4:
+                candidates.append(n)
+        try:
+            n_old = ord(raw[0]) - 32
+        except TypeError:
+            n_old = -1
+        if 1 <= n_old <= 45 and body_len >= ((n_old + 2) // 3) * 4:
+            candidates.append(n_old)
+
+        for n in candidates:
+            if body_len == ((n + 2) // 3) * 4:
+                return n
+        if candidates:
+            return candidates[0]
+        raise CodecError(f"不是合法的 XXencode:行长度标记非法({raw[0]!r})")
+
     def decode(self, text: str, **p) -> str:
         if not text.strip():
             return ""
@@ -65,9 +94,7 @@ class XueCodec(CodecBase):
         for raw in text.strip().splitlines():
             if not raw or raw.startswith("begin") or raw == "end":
                 continue
-            n = ord(raw[0]) - 32
-            if not (0 < n <= 45):
-                raise CodecError(f"不是合法的 XXencode:行长度标记非法({raw[0]!r})")
+            n = self._line_length(raw)
             body = raw[1:]
             need = ((n + 2) // 3) * 4
             if len(body) < need:

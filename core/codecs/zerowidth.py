@@ -11,10 +11,14 @@ ZW1 = chr(0x200C)   # bit 1
 class ZeroWidthCodec(CodecBase):
     name = "零宽字符"
     category = "隐写编码"
-    description = "U+200B=0,U+200C=1;可混入正常文本,解码自动提取"
-    params = [("cover", "伪装文本(可空,编码时混入)", "")]
+    description = (
+        "输入区填要隐藏的明文;伪装文本是显示用的载体文字(仅编码时使用,可空)。"
+        "解码时输入区填带零宽字符的文本,伪装文本会被忽略。U+200B=0,U+200C=1。"
+    )
+    params = [("cover", "伪装文本/载体(仅编码用,可空)", "")]
 
     def encode(self, text: str, **params) -> str:
+        # text = 真正要隐藏的内容;cover = 明面上看到的载体文字
         data = self.to_bytes(text)
         bits = "".join(f"{b:08b}" for b in data)
         hidden = "".join(ZW1 if bit == "1" else ZW0 for bit in bits)
@@ -25,6 +29,7 @@ class ZeroWidthCodec(CodecBase):
         return hidden
 
     def decode(self, text: str, **params) -> str:
+        # 解码只提取零宽字符;cover 参数在这里没有作用
         if not text:
             return ""
         bits = []

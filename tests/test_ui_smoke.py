@@ -105,10 +105,16 @@ class DecoderPanelSmokeTests(unittest.TestCase):
 
     def test_new_parameter_rows(self):
         self.select("AES")
-        self.assertIn("key_format", self.panel._param_edits)
-        self.assertIn("iv_format", self.panel._param_edits)
+        for name in ("mode", "padding", "format", "key_format", "iv_format"):
+            self.assertIsInstance(self.panel._param_edits[name], QComboBox)
+        self.assertFalse(self.panel.btn_gen_key.isHidden())
+        self.assertFalse(self.panel.btn_gen_iv.isHidden())
         self.select("RC4")
-        self.assertIn("key_format", self.panel._param_edits)
+        for name in ("plaintext_format", "format", "key_format"):
+            self.assertIsInstance(self.panel._param_edits[name], QComboBox)
+        self.assertFalse(self.panel.btn_gen_key.isHidden())
+        self.select("Hill 密码")
+        self.assertTrue(self.panel.btn_gen_key.isHidden())
         self.select("Hill 密码")
         for name in ("char_mode", "mode", "restore", "strip_padding"):
             self.assertIsInstance(self.panel._param_edits[name], QComboBox)
@@ -123,6 +129,71 @@ class DecoderPanelSmokeTests(unittest.TestCase):
         self.select("猪圈密码")
         self.assertIsInstance(self.panel._param_edits["separator"], QComboBox)
         self.assertIsInstance(self.panel._param_edits["keep_nonletters"], QCheckBox)
+
+    def test_md5_ui(self):
+        self.select("MD5")
+        self.assertFalse(self.panel.btn_decode.isEnabled())
+        self.panel.input_edit.setPlainText("flag{welcome come to ctf}")
+        self.panel._on_encode()
+        self.assertEqual(
+            self.panel.output_edit.toPlainText(),
+            "MD5-16 位小写: 4fb23af40142ec75\n"
+            "MD5-16 位大写: 4FB23AF40142EC75\n"
+            "MD5-32 位小写: d46927f94fb23af40142ec75dac57186\n"
+            "MD5-32 位大写: D46927F94FB23AF40142EC75DAC57186",
+        )
+
+    def test_aes_ui_generation_and_iv_state(self):
+        self.select("AES")
+        self.assertFalse(self.panel.iv_edit.isEnabled())  # 默认 ECB
+        self.assertFalse(self.panel._param_edits["iv_format"].isEnabled())
+
+        self.panel._generate_key()
+        self.assertEqual(len(self.panel.key_edit.text()), 16)
+
+        mode = self.panel._param_edits["mode"]
+        mode.setCurrentIndex(mode.findData("CBC"))
+        self.assertTrue(self.panel.iv_edit.isEnabled())
+        self.assertTrue(self.panel._param_edits["iv_format"].isEnabled())
+        self.panel._generate_iv()
+        self.assertEqual(len(self.panel.iv_edit.text()), 16)
+
+        self.panel.input_edit.setPlainText("Hello, World!")
+        self.panel._on_encode()
+        ct = self.panel.output_edit.toPlainText()
+        self.panel.input_edit.setPlainText(ct)
+        self.panel._on_decode()
+        self.assertEqual(self.panel.output_edit.toPlainText(), "Hello, World!")
+
+        # 切回 ECB 后 IV 被禁用并清空
+        mode.setCurrentIndex(mode.findData("ECB"))
+        self.assertFalse(self.panel.iv_edit.isEnabled())
+        self.assertEqual(self.panel.iv_edit.text(), "")
+
+    def test_rc4_ui_plaintext_formats(self):
+        self.select("RC4")
+        self.panel.key_edit.setText("deadbeef")
+        plain_widget = self.panel._param_edits["plaintext_format"]
+        plain_widget.setCurrentIndex(plain_widget.findData("hex"))
+        self.panel.input_edit.setPlainText("48656c6c6f2c20576f726c6421")
+        self.panel._on_encode()
+        ct = self.panel.output_edit.toPlainText()
+        self.assertTrue(ct)
+        self.panel.input_edit.setPlainText(ct)
+        self.panel._on_decode()
+        self.assertEqual(self.panel.output_edit.toPlainText(),
+                         "48656c6c6f2c20576f726c6421")
+
+    def test_zero_width_ui_cover(self):
+        self.select("零宽字符")
+        self.panel._param_edits["cover"].setText("hello world")
+        self.panel.input_edit.setPlainText("flag{zero_width}")
+        self.panel._on_encode()
+        encoded = self.panel.output_edit.toPlainText()
+        self.assertIn("hello world", encoded.replace("\u200b", "").replace("\u200c", ""))
+        self.panel.input_edit.setPlainText(encoded)
+        self.panel._on_decode()
+        self.assertEqual(self.panel.output_edit.toPlainText(), "flag{zero_width}")
 
     def test_pigpen_ui(self):
         self.select("猪圈密码")

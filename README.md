@@ -5,7 +5,7 @@
 ## 功能特性
 
 - **35 种算法**，按「Base 家族 / 古典密码 / 哈希 / 对称密码 / 文本编码 / 趣味编码 / 进制 / 隐写编码」分类
-- **动态参数区**：密钥、IV、自定义字母表、算法专属参数（如凯撒偏移量、栅栏栏数、AES 模式）随算法自动显隐
+- **动态参数区**：密钥、IV、自定义字母表、算法专属参数（如凯撒偏移量、栅栏栏数、AES 模式）随算法自动显隐；AES/RC4 密钥和 AES IV 支持一键随机生成
 - **一键智能解码**：多层 BFS 链式尝试，自动识别套娃编码并给出 Top N 结果
 - **单向算法保护**：MD5 等不可逆算法自动禁用解码按钮
 - **字节级无损往返**：内部使用 `surrogateescape`，乱码输入也不会崩溃或丢字节
@@ -69,12 +69,12 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 |---|---|
 | Base 家族（10） | Base16、Base32、Base45、Base58、Base62、Base64、Base85、Ascii85、Base91、Base92 |
 | 古典密码（11） | 凯撒密码、仿射密码、ROT13、Atbash、维吉尼亚、栅栏密码、曲路密码、培根密码、摩斯电码、猪圈密码、Hill 密码 |
-| 文本编码（6） | Hex、URL 编码、ASCII 码、Quoted-printable、UUencode、XXencode |
+| 文本编码（6） | Hex、URL 编码、ASCII 码、Quoted-printable、UUencode、XXencode（兼容浏览器版长度标记） |
 | 趣味编码（3） | Brainfuck、Ook!、JSFuck |
-| 对称密码（2） | AES（ECB / CBC）、RC4 |
-| 哈希（1） | MD5（不可逆，仅编码方向） |
+| 对称密码（2） | AES（ECB / CBC，PKCS7/无填充/零填充/ISO10126）、RC4（明文 string/hex/base64） |
+| 哈希（1） | MD5（不可逆，输出 16/32 位、大小写四种格式） |
 | 进制（1） | 任意 2/8/10/16 进制互转 |
-| 隐写编码（1） | 零宽字符 |
+| 隐写编码（1） | 零宽字符（输入=隐藏内容，伪装文本=载体文字） |
 
 ### ⚠️ Base85 与 Ascii85 的区别（易混淆）
 

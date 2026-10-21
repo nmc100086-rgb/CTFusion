@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import secrets
+import string
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
@@ -72,8 +75,27 @@ class DecoderPanel(QWidget):
         self.key_label = QLabel("密钥:")
         self.iv_label = QLabel("IV:")
         self.alphabet_label = QLabel("自定义字母表:")
-        form.addRow(self.key_label, self.key_edit)
-        form.addRow(self.iv_label, self.iv_edit)
+
+        self.btn_gen_key = QPushButton("生成")
+        self.btn_gen_key.setToolTip("随机生成 16 字节密钥")
+        self.btn_gen_key.clicked.connect(self._generate_key)
+        self.key_row = QWidget()
+        key_layout = QHBoxLayout(self.key_row)
+        key_layout.setContentsMargins(0, 0, 0, 0)
+        key_layout.addWidget(self.key_edit)
+        key_layout.addWidget(self.btn_gen_key)
+
+        self.btn_gen_iv = QPushButton("生成")
+        self.btn_gen_iv.setToolTip("随机生成 16 字节 IV")
+        self.btn_gen_iv.clicked.connect(self._generate_iv)
+        self.iv_row = QWidget()
+        iv_layout = QHBoxLayout(self.iv_row)
+        iv_layout.setContentsMargins(0, 0, 0, 0)
+        iv_layout.addWidget(self.iv_edit)
+        iv_layout.addWidget(self.btn_gen_iv)
+
+        form.addRow(self.key_label, self.key_row)
+        form.addRow(self.iv_label, self.iv_row)
         form.addRow(self.alphabet_label, self.alphabet_edit)
         # 动态参数行(按算法 params 声明重建)
         self._dyn_rows: list[tuple[QLabel | None, QWidget]] = []
@@ -126,19 +148,27 @@ class DecoderPanel(QWidget):
             self.alphabet_edit.clear()
         self._last_codec = codec
         # 固定行按能力声明显隐
-        for label, edit, show, hint in (
-            (self.key_label, self.key_edit, codec.need_key, codec.key_hint),
-            (self.iv_label, self.iv_edit, codec.need_iv, ""),
-            (self.alphabet_label, self.alphabet_edit, codec.need_alphabet, codec.alphabet_hint),
-        ):
-            label.setVisible(show)
-            edit.setVisible(show)
-            edit.setPlaceholderText(hint)
+        self.key_label.setVisible(codec.need_key)
+        self.key_row.setVisible(codec.need_key)
+        self.btn_gen_key.setVisible(codec.need_key and getattr(codec, "auto_key", False))
+        self.key_edit.setPlaceholderText(codec.key_hint)
+
+        self.iv_label.setVisible(codec.need_iv)
+        self.iv_row.setVisible(codec.need_iv)
+        self.btn_gen_iv.setVisible(codec.need_iv and getattr(codec, "auto_iv", False))
+        self.iv_edit.setPlaceholderText("")
+
+        self.alphabet_label.setVisible(codec.need_alphabet)
+        self.alphabet_edit.setVisible(codec.need_alphabet)
+        self.alphabet_edit.setPlaceholderText(codec.alphabet_hint)
+
         # 单向算法禁用解码按钮
         self.btn_decode.setEnabled(not codec.one_way)
         self.btn_decode.setToolTip("该算法为单向哈希,无法解码" if codec.one_way else "")
         # 重建动态参数行
         self._rebuild_dynamic_params(codec)
+        # ECB 模式不允许使用 IV
+        self._update_iv_state()
         # 描述提示
         self.param_box.setToolTip(codec.description)
 
@@ -175,6 +205,64 @@ class DecoderPanel(QWidget):
             self._dyn_form.addRow(label, edit)
             self._dyn_rows.append((label, edit))
             self._param_edits[name] = edit
+        mode_widget = self._param_edits.get("mode")
+        if isinstance(mode_widget, QComboBox):
+            mode_widget.currentIndexChanged.connect(self._update_iv_state)
+
+    def _param_value(self, name: str) -> str:
+        widget = self._param_edits.get(name)
+        if isinstance(widget, QComboBox):
+            data = widget.currentData()
+            return "" if data is None else str(data)
+        if isinstance(widget, QLineEdit):
+            return widget.text()
+        if isinstance(widget, QCheckBox):
+            return "1" if widget.isChecked() else "0"
+        return ""
+
+    def _update_iv_state(self, _index: int = 0) -> None:
+        """AES 选 ECB 时禁用并清空 IV;CBC 时启用。"""
+        codec = self._current_codec()
+        if codec is None or not codec.need_iv:
+            return
+        enabled = True
+        if codec.name == "AES":
+            enabled = self._param_value("mode").strip().upper() != "ECB"
+        self.iv_edit.setEnabled(enabled)
+        self.btn_gen_iv.setEnabled(enabled)
+        iv_format_widget = self._param_edits.get("iv_format")
+        if isinstance(iv_format_widget, QComboBox):
+            iv_format_widget.setEnabled(enabled)
+        if not enabled:
+            self.iv_edit.clear()
+            self.iv_edit.setPlaceholderText("ECB 模式不需要 IV")
+        else:
+            self.iv_edit.setPlaceholderText("")
+
+    def _generate_key(self) -> None:
+        codec = self._current_codec()
+        if codec is None or not getattr(codec, "auto_key", False):
+            return
+        if self._param_value("key_format") == "hex":
+            value = secrets.token_hex(16)       # 32 个 hex 字符 = 16 字节
+        else:
+            alphabet = string.ascii_letters + string.digits
+            value = "".join(secrets.choice(alphabet) for _ in range(16))
+        self.key_edit.setText(value)
+
+    def _generate_iv(self) -> None:
+        codec = self._current_codec()
+        if codec is None or not getattr(codec, "auto_iv", False):
+            return
+        if codec.name == "AES" and self._param_value("mode").strip().upper() == "ECB":
+            self._info("ECB 模式不需要 IV。")
+            return
+        if self._param_value("iv_format") == "hex":
+            value = secrets.token_hex(16)       # 32 个 hex 字符 = 16 字节
+        else:
+            alphabet = string.ascii_letters + string.digits
+            value = "".join(secrets.choice(alphabet) for _ in range(16))
+        self.iv_edit.setText(value)
 
     def _collect_params(self) -> dict[str, str]:
         params: dict[str, str] = {}

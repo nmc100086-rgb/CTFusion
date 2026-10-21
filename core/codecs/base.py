@@ -36,6 +36,9 @@ class CodecBase:
     param_choices: ClassVar[dict[str, list[tuple[str, str]]]] = {}
     # 可选:这些参数用复选框渲染,取值 "1"/"0"。
     param_bool: ClassVar[set[str]] = set()
+    # UI 是否显示“随机生成”按钮
+    auto_key: bool = False
+    auto_iv: bool = False
 
     registry: ClassVar[list["CodecBase"]] = []
 

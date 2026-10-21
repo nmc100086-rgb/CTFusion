@@ -181,6 +181,42 @@ class CodecRoundTripTests(unittest.TestCase):
         wells = "..-. .-.. .- --. .--.- .-- . .-.. -.-. --- -- . .--.--"
         self.assertEqual(morse.decode(wells), "flag{welcome}")
 
+    def test_aes_padding_modes(self):
+        aes = codec("AES")
+        key = "0123456789abcdef"
+        iv = "abcdefghijklmnop"
+        for padding in ("pkcs7", "zero", "iso10126"):
+            with self.subTest(padding=padding):
+                ct = aes.encode("Hello, World!", key=key, iv=iv, mode="CBC",
+                                padding=padding, format="base64")
+                self.assertEqual(
+                    aes.decode(ct, key=key, iv=iv, mode="CBC",
+                               padding=padding, format="base64"),
+                    "Hello, World!",
+                )
+        # 无填充:长度必须是 16 的倍数
+        ct = aes.encode("0123456789abcdef", key=key, mode="ECB",
+                        padding="none", format="hex")
+        self.assertEqual(
+            aes.decode(ct, key=key, mode="ECB", padding="none", format="hex"),
+            "0123456789abcdef",
+        )
+        with self.assertRaisesRegex(Exception, "16 的整数倍"):
+            aes.encode("abc", key=key, mode="ECB", padding="none")
+
+    def test_md5_four_formats(self):
+        md5 = codec("MD5")
+        plaintext = "flag{welcome come to ctf}"
+        expected = "\n".join((
+            "MD5-16 位小写: 4fb23af40142ec75",
+            "MD5-16 位大写: 4FB23AF40142EC75",
+            "MD5-32 位小写: d46927f94fb23af40142ec75dac57186",
+            "MD5-32 位大写: D46927F94FB23AF40142EC75DAC57186",
+        ))
+        self.assertEqual(md5.encode(plaintext), expected)
+        with self.assertRaisesRegex(Exception, "单向哈希"):
+            md5.decode("d46927f94fb23af40142ec75dac57186")
+
     def test_affine_cipher(self):
         affine = codec("仿射密码")
         # 经典向量:a=5,b=8
@@ -234,6 +270,28 @@ class CodecRoundTripTests(unittest.TestCase):
             "FLAG{WELCOME}",
         )
 
+    def test_xxencode_browser_and_legacy(self):
+        xx = codec("XXencode")
+        plaintext = "flag{welcome come to ctf}"
+        browser = "NNalVNrhrNKlXPqpZ64BjPKIUR4wUMrFaTE++"
+        legacy = "9NalVNrhrNKlXPqpZ64BjPKIUR4wUMrFaTE++"
+        self.assertEqual(xx.encode(plaintext), browser)
+        self.assertEqual(xx.decode(browser), plaintext)
+        # 兼容旧版项目输出的 ASCII+32 长度标记
+        self.assertEqual(xx.decode(legacy), plaintext)
+        for text in ("A", "AB", "ABC", "ABCD", "A" * 45, "A" * 46):
+            with self.subTest(length=len(text)):
+                self.assertEqual(xx.decode(xx.encode(text)), text)
+
+    def test_zero_width_cover_semantics(self):
+        zw = codec("零宽字符")
+        secret = "flag{zero_width}"
+        encoded = zw.encode(secret, cover="hello world")
+        self.assertIn("hello world", encoded.replace("\u200b", "").replace("\u200c", ""))
+        self.assertEqual(zw.decode(encoded), secret)
+        # 解码时 cover 参数不参与,传什么都不影响
+        self.assertEqual(zw.decode(encoded, cover="ignored"), secret)
+
     def test_rail_fence_standard_and_w(self):
         fence = codec("栅栏密码")
         # W 型:之字形
@@ -269,6 +327,28 @@ class CodecRoundTripTests(unittest.TestCase):
 
 
 class SymmetricTests(unittest.TestCase):
+    def test_rc4_plaintext_formats(self):
+        rc4 = codec("RC4")
+        key = "deadbeef"
+        cases = {
+            "string": "Hello, World!",
+            "hex": "48656c6c6f2c20576f726c6421",
+            "base64": "SGVsbG8sIFdvcmxkIQ==",
+        }
+        for plaintext_format, plaintext in cases.items():
+            for ciphertext_format in ("base64", "hex"):
+                with self.subTest(plaintext_format=plaintext_format,
+                                  ciphertext_format=ciphertext_format):
+                    ct = rc4.encode(plaintext, key=key,
+                                    plaintext_format=plaintext_format,
+                                    format=ciphertext_format)
+                    self.assertEqual(
+                        rc4.decode(ct, key=key,
+                                   plaintext_format=plaintext_format,
+                                   format=ciphertext_format),
+                        plaintext,
+                    )
+
     def test_rc4_ascii_key_is_not_auto_hex(self):
         c = codec("RC4")
         # 与 PyCryptodome 的 ASCII 密钥结果一致
