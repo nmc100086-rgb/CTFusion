@@ -1,10 +1,23 @@
-"""编解码器注册表：新增编码实现后在 REGISTRY 登记，链式爆破即可自动发现。"""
+"""编解码器包:导入实现模块即触发 __init_subclass__ 自动注册。"""
 
-from core.codecs.base import Codec
+from core.codecs.base import CodecBase, CodecError  # noqa: F401
 
-REGISTRY: list[Codec] = [
-    # TODO: 实现后逐个注册，例如:
-    # Base64Codec(),
-    # HexCodec(),
-    # MorseCodec(),
-]
+# 导入全部实现模块,触发自动注册
+from core.codecs import (  # noqa: F401
+    bases,
+    classical,
+    hashes,
+    hill,
+    jsfuck,
+    ook,
+    rot,
+    symmetric,
+    text_enc,
+    uue,
+    zerowidth,
+)
+
+
+def get_all() -> list[CodecBase]:
+    """按分类、名称排序返回全部已注册编码器。"""
+    return sorted(CodecBase.registry, key=lambda c: (c.category, c.name))
