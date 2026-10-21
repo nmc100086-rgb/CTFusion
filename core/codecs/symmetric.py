@@ -9,13 +9,41 @@ import re
 from core.codecs.base import CodecBase, CodecError
 
 
-def _parse_bytes(s: str, what: str, lengths: tuple[int, ...], hex_lens: tuple[int, ...]) -> bytes:
-    """解析密钥/IV:优先按 hex(长度匹配时),否则按 UTF-8。"""
+def _parse_material(s: str, what: str, lengths: tuple[int, ...],
+                     hex_lens: tuple[int, ...], fmt: str = "auto") -> bytes:
+    """解析密钥/IV。
+
+    fmt=auto: 默认按 UTF-8;只有显式 "hex:" 前缀才按 hex 解析。
+    fmt=utf8: 强制按 UTF-8。
+    fmt=hex:  强制按 hex 解析(也可继续使用 "hex:" 前缀)。
+    这样 "deadbeef" 这类普通密钥不会被悄悄当成 4 个 hex 字节。
+    """
     raw = s.strip()
     if not raw:
         raise CodecError(f"请输入{what}")
-    if re.fullmatch(r"[0-9a-fA-F]+", raw) and len(raw) in hex_lens:
-        return bytes.fromhex(raw)
+    fmt = (fmt or "auto").strip().lower()
+    if fmt not in ("auto", "utf8", "hex"):
+        raise CodecError("密钥/IV 格式仅支持 auto、utf8 或 hex")
+
+    if fmt != "utf8" and raw.lower().startswith("hex:"):
+        raw = raw[4:].strip()
+        use_hex = True
+    else:
+        use_hex = fmt == "hex"
+
+    if use_hex:
+        if not raw:
+            raise CodecError(f"请输入{what}")
+        if len(raw) % 2:
+            raise CodecError(f"{what}的 hex 长度必须为偶数(当前 {len(raw)} 个字符)")
+        if hex_lens and len(raw) not in hex_lens:
+            want = "/".join(str(x) for x in hex_lens)
+            raise CodecError(f"{what}的 hex 长度需为 {want} 个字符(当前 {len(raw)} 个)")
+        try:
+            return bytes.fromhex(raw)
+        except ValueError:
+            raise CodecError(f"{what}不是合法的 hex")
+
     data = raw.encode("utf-8")
     if lengths and len(data) not in lengths:
         want = "/".join(str(x) for x in lengths)
@@ -48,20 +76,22 @@ def _parse_fmt(params: dict) -> str:
 class AesCodec(CodecBase):
     name = "AES"
     category = "对称密码"
-    description = "AES-ECB/CBC,PKCS7 填充;密钥 16/24/32 字节,支持 hex"
+    description = "AES-ECB/CBC,PKCS7 填充;密钥 16/24/32 字节,hex 请加 hex: 前缀或选 key_format=hex"
     need_key = True
-    key_hint = "16/24/32 字节字符串,或 32/48/64 位 hex"
+    key_hint = "16/24/32 字节字符串;hex 密钥用 hex: 前缀,或在参数区选 key_format=hex"
     need_iv = True
     params = [
         ("mode", "模式(ECB/CBC)", "ECB"),
         ("format", "密文格式(base64/hex)", "base64"),
+        ("key_format", "密钥格式(auto/utf8/hex)", "auto"),
+        ("iv_format", "IV 格式(auto/utf8/hex)", "auto"),
     ]
 
-    def _cipher(self, key_b: bytes, iv: str, mode: str, encrypting: bool):
+    def _cipher(self, key_b: bytes, iv: str, mode: str, iv_format: str = "auto"):
         from Crypto.Cipher import AES
         if mode == "ECB":
             return AES.new(key_b, AES.MODE_ECB)
-        iv_b = _parse_bytes(iv, "IV", (16,), (32,))
+        iv_b = _parse_material(iv, "IV", (16,), (32,), iv_format)
         return AES.new(key_b, AES.MODE_CBC, iv_b)
 
     def _mode(self, params: dict) -> str:
@@ -72,22 +102,24 @@ class AesCodec(CodecBase):
 
     def encode(self, text: str, key: str = "", iv: str = "", **params) -> str:
         from Crypto.Util.Padding import pad
-        key_b = _parse_bytes(key, "AES 密钥", (16, 24, 32), (32, 48, 64))
+        key_b = _parse_material(key, "AES 密钥", (16, 24, 32), (32, 48, 64),
+                                params.get("key_format", "auto"))
         mode = self._mode(params)
         fmt = _parse_fmt(params)
-        cipher = self._cipher(key_b, iv, mode, True)
+        cipher = self._cipher(key_b, iv, mode, params.get("iv_format", "auto"))
         ct = cipher.encrypt(pad(self.to_bytes(text), 16))
         return _fmt_out(ct, fmt)
 
     def decode(self, text: str, key: str = "", iv: str = "", **params) -> str:
         from Crypto.Util.Padding import unpad
-        key_b = _parse_bytes(key, "AES 密钥", (16, 24, 32), (32, 48, 64))
+        key_b = _parse_material(key, "AES 密钥", (16, 24, 32), (32, 48, 64),
+                                params.get("key_format", "auto"))
         mode = self._mode(params)
         fmt = _parse_fmt(params)
         ct = _fmt_in(text, fmt, self.name)
         if len(ct) % 16:
             raise CodecError("解密失败:密文长度不是 16 的倍数")
-        cipher = self._cipher(key_b, iv, mode, False)
+        cipher = self._cipher(key_b, iv, mode, params.get("iv_format", "auto"))
         try:
             pt = unpad(cipher.decrypt(ct), 16)
         except ValueError:
@@ -98,20 +130,18 @@ class AesCodec(CodecBase):
 class Rc4Codec(CodecBase):
     name = "RC4"
     category = "对称密码"
-    description = "RC4 流密码;密钥任意长度,支持 hex"
+    description = "RC4 流密码;密钥任意长度,hex 请加 hex: 前缀或选 key_format=hex"
     need_key = True
-    key_hint = "任意长度字符串,或 hex"
-    params = [("format", "密文格式(base64/hex)", "base64")]
+    key_hint = "任意长度字符串;hex 密钥用 hex: 前缀,或在参数区选 key_format=hex"
+    params = [
+        ("format", "密文格式(base64/hex)", "base64"),
+        ("key_format", "密钥格式(auto/utf8/hex)", "auto"),
+    ]
 
     def _crypt(self, text: str, key: str, params: dict, fmt_out: bool) -> str:
         from Crypto.Cipher import ARC4
-        raw = key.strip()
-        if not raw:
-            raise CodecError("请输入 RC4 密钥")
-        if re.fullmatch(r"[0-9a-fA-F]+", raw) and len(raw) % 2 == 0 and len(raw) >= 2:
-            key_b = bytes.fromhex(raw)
-        else:
-            key_b = raw.encode("utf-8")
+        key_b = _parse_material(key, "RC4 密钥", (), (),
+                                params.get("key_format", "auto"))
         fmt = _parse_fmt(params)
         cipher = ARC4.new(key_b)
         if fmt_out:

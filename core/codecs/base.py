@@ -32,6 +32,9 @@ class CodecBase:
     alphabet_hint: str = ""
     params: list[tuple[str, str, str]] = []   # (参数名, 界面标签, 默认值)
 
+    # 可选:参数名 -> [(下拉显示文本, 实际值), ...]。声明后 UI 用下拉框渲染。
+    param_choices: ClassVar[dict[str, list[tuple[str, str]]]] = {}
+
     registry: ClassVar[list["CodecBase"]] = []
 
     def __init_subclass__(cls, abstract: bool = False, **kwargs) -> None:
@@ -58,6 +61,15 @@ class CodecBase:
         return data.decode("utf-8", errors="surrogateescape")
 
 
+# flag 特征使用词边界,避免把 "monkey{...}" 里的 "key{...}" 误判成 flag
+FLAG_RE = re.compile(r"\b(flag|ctf|key)\{[^}\n]{0,80}\}", re.IGNORECASE)
+
+
+def has_flag(s: str) -> bool:
+    """判断文本中是否出现常见 flag 格式。"""
+    return bool(FLAG_RE.search(s))
+
+
 def readability(s: str) -> float:
     """文本可读性评分，供一键智能解码排序。命中 flag 格式直接高分。"""
     if not s:
@@ -66,7 +78,7 @@ def readability(s: str) -> float:
     n = len(sample)
     printable = sum(1 for c in sample if c.isprintable() or c in "\n\r\t") / n
     score = printable * 0.6
-    if re.search(r"(flag|ctf|key)\{[^}\n]{0,80}\}", sample, re.IGNORECASE):
+    if has_flag(sample):
         score += 1.0
     if n >= 8:
         space_ratio = sample.count(" ") / n

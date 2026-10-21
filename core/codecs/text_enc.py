@@ -5,7 +5,7 @@ from __future__ import annotations
 import binascii
 import quopri
 import re
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote_plus
 
 from core.codecs.base import CodecBase, CodecError
 
@@ -32,19 +32,19 @@ class HexCodec(CodecBase):
 class UrlCodec(CodecBase):
     name = "URL 编码"
     category = "文本编码"
-    description = "Percent-Encoding,+ 号视为空格"
+    description = "Percent-Encoding;解码时 + 号视为空格(兼容表单编码)"
 
     def encode(self, text: str, **p) -> str:
         return quote(self.to_bytes(text), safe="")
 
     def decode(self, text: str, **p) -> str:
         try:
-            return self.to_text(unquote(text, errors="surrogateescape").encode(
+            return self.to_text(unquote_plus(text, errors="surrogateescape").encode(
                 "utf-8", errors="surrogateescape"))
         except Exception:
-            # unquote 本身几乎不抛错,兜底按原样返回字节流
+            # unquote_plus 本身几乎不抛错,兜底按原样返回字节流
             try:
-                return unquote(text)
+                return unquote_plus(text)
             except Exception as e:
                 raise CodecError(f"URL 解码失败:{e}")
 
@@ -58,13 +58,22 @@ class AsciiCodec(CodecBase):
         return " ".join(str(ord(c)) for c in text)
 
     def decode(self, text: str, **p) -> str:
+        if not text.strip():
+            return ""
         tokens = re.split(r"[\s,]+", text.strip())
         if not tokens or tokens == [""]:
             raise CodecError("请输入以空格/逗号分隔的码点序列")
         chars = []
         for tok in tokens:
             try:
-                chars.append(chr(int(tok, 0)))
+                # 0x/0b/0o 用 base=0,普通十进制允许 065 这类前导零写法
+                base = 0 if tok.lower().startswith(("0x", "0b", "0o")) else 10
+                cp = int(tok, base)
+                if 0xD800 <= cp <= 0xDFFF:
+                    raise CodecError(f"码点 {cp} 位于 Unicode 代理区,不能单独解码")
+                chars.append(chr(cp))
+            except CodecError:
+                raise
             except (ValueError, OverflowError):
                 raise CodecError(f"无法识别的码点:{tok!r}(支持十进制或 0x 前缀十六进制)")
         return "".join(chars)
@@ -88,7 +97,7 @@ class QPCodec(CodecBase):
 class BaseConvertCodec(CodecBase):
     name = "进制转换"
     category = "进制"
-    description = "2/8/10/16 进制互转,支持空格或逗号分隔的多组数值"
+    description = "2/8/10/16 进制互转;编码按 源→目标,解码按 目标→源;支持空格或逗号分隔的多组数值"
     detectable = False   # 歧义太大,不参与一键智能解码
     params = [
         ("from_base", "源进制(2/8/10/16)", "10"),
@@ -96,14 +105,19 @@ class BaseConvertCodec(CodecBase):
     ]
 
     _DIGITS = "0123456789abcdef"
+    _PREFIX = {2: "0b", 8: "0o", 16: "0x"}
 
     def _convert(self, text: str, from_base: int, to_base: int) -> str:
+        if not text.strip():
+            return ""
         tokens = re.split(r"[\s,]+", text.strip())
         if not tokens or tokens == [""]:
             raise CodecError("请输入要转换的数值(可多组,空格/逗号分隔)")
         out = []
+        prefix = self._PREFIX.get(from_base, "")
         for tok in tokens:
-            tok = re.sub(r"^(0x|0b|0o)", "", tok, flags=re.IGNORECASE)
+            if prefix and tok.lower().startswith(prefix):
+                tok = tok[len(prefix):]
             try:
                 num = int(tok, from_base)
             except ValueError:
@@ -139,5 +153,6 @@ class BaseConvertCodec(CodecBase):
         return self._convert(text, fb, tb)
 
     def decode(self, text: str, **params) -> str:
+        # 编码是 源→目标,解码必须反过来 目标→源
         fb, tb = self._parse_bases(params)
-        return self._convert(text, fb, tb)
+        return self._convert(text, tb, fb)

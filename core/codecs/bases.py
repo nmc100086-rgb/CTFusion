@@ -1,7 +1,7 @@
-"""Base 家族编码:16/32/45/58/62/64/85/91/92/100。
+"""Base 家族编码:16/32/45/58/62/64/85/91/92。
 
 Base16/32/64/85 基于标准库,支持自定义字母表;
-Base45(RFC 9285)/Base58/Base62/Base91/Base92/Base100 为自实现;
+Base45(RFC 9285)/Base58/Base62/Base91/Base92 为自实现;
 Base58/62/92 支持自定义字母表。
 """
 
@@ -61,6 +61,9 @@ class _StdBase(CodecBase, abstract=True):
             if len(set(alphabet)) != len(self.STD):
                 raise CodecError(
                     f"自定义字母表需为 {len(self.STD)} 个不重复字符(当前 {len(set(alphabet))} 个)")
+            # Base32/Base64 的 '=' 是填充符,不能同时作为数据字符
+            if len(self.STD) in (32, 64) and "=" in alphabet:
+                raise CodecError("自定义字母表不能包含填充符 '='")
             return alphabet
         return self.STD
 
@@ -106,6 +109,9 @@ class Base32Codec(_StdBase):
         table = self._check_alphabet(alphabet)
         s = _WS.sub("", text)
         s = self._translate(s, table, self.STD)
+        # 很多 CTF 题会省略 padding,这里按 RFC 4648 的 8 字符分组补齐
+        if "=" not in s:
+            s += "=" * (-len(s) % 8)
         try:
             return self.to_text(base64.b32decode(s.upper()))
         except (binascii.Error, ValueError) as e:
@@ -240,7 +246,7 @@ class Base85Codec(_StdBase):
         table = self._check_alphabet(alphabet)
         s = _WS.sub("", text)
         if not s:
-            raise CodecError("请输入 Base85 编码内容")
+            return ""
         charset = set(table)
         for ch in s:
             if ch not in charset:
@@ -267,10 +273,21 @@ class Ascii85Codec(CodecBase):
 
     def decode(self, text: str, **p) -> str:
         s = _WS.sub("", text)
-        s = s.strip("<>~").strip()
         if not s:
             return ""
         charset = set(self.STD)
+        # 只有完整的 Adobe 包装 <~ ... ~> 才去掉;'<' '>' 本身也是合法数据字符。
+        wrapped = s.startswith("<~") and s.endswith("~>")
+        if wrapped:
+            payload = s[2:-2]
+            # Adobe 版本允许 z 表示 4 个零字节
+            for ch in payload:
+                if ch not in charset and ch != "z":
+                    raise CodecError(f"不是合法的 Ascii85:包含非法字符 {ch!r}")
+            try:
+                return self.to_text(base64.a85decode(s, adobe=True))
+            except (binascii.Error, ValueError) as e:
+                raise CodecError(f"不是合法的 Ascii85:{e}")
         for ch in s:
             if ch not in charset:
                 raise CodecError(f"不是合法的 Ascii85:包含非法字符 {ch!r}")

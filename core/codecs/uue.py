@@ -20,6 +20,8 @@ class UueCodec(CodecBase):
         return "\n".join(lines)
 
     def decode(self, text: str, **p) -> str:
+        if not text.strip():
+            return ""
         out = bytearray()
         for raw in text.strip().splitlines():
             line = raw.rstrip("\n")
@@ -57,6 +59,8 @@ class XueCodec(CodecBase):
         return "\n".join(lines)
 
     def decode(self, text: str, **p) -> str:
+        if not text.strip():
+            return ""
         out = bytearray()
         for raw in text.strip().splitlines():
             if not raw or raw.startswith("begin") or raw == "end":

@@ -14,7 +14,8 @@ _CHARSET = set("[]()!+")
 class JsfuckCodec(CodecBase):
     name = "JSFuck"
     category = "趣味编码"
-    description = "[]()!+ 六字符 JS;解码调用本机 Node.js 执行"
+    description = "[]()!+ 六字符 JS;解码调用本机 Node.js 执行。注意:会在本机执行任意 JS,请只对可信输入使用"
+    detectable = False   # 一键智能解码不自动执行 JS
 
     def encode(self, text: str, **p) -> str:
         raise CodecError("JSFuck 编码依赖浏览器环境,请在浏览器控制台完成;本工具支持解码。")
@@ -31,12 +32,19 @@ class JsfuckCodec(CodecBase):
         if not node:
             raise CodecError("JSFuck 解码需要本机安装 Node.js(用于执行 JS),未检测到 node 命令。")
 
+        # 通过 stdin 传代码,避免 Windows 32K 命令行长度限制
+        script = (
+            "let s='';process.stdin.setEncoding('utf8');"
+            "process.stdin.on('data',d=>s+=d);"
+            "process.stdin.on('end',()=>{"
+            "try{const r=eval(s);"
+            "console.log(typeof r==='string'?r:String(r))}"
+            "catch(e){process.exit(3)}});"
+        )
         try:
             proc = subprocess.run(
-                [node, "-e",
-                 "try{const r=eval(process.argv[1]);console.log(typeof r==='string'?r:String(r))}"
-                 "catch(e){process.exit(3)}",
-                 code],
+                [node, "-e", script],
+                input=code.encode("utf-8"),
                 capture_output=True, timeout=15,
             )
         except subprocess.TimeoutExpired:

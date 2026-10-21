@@ -25,6 +25,8 @@ class ZeroWidthCodec(CodecBase):
         return hidden
 
     def decode(self, text: str, **params) -> str:
+        if not text:
+            return ""
         bits = []
         for ch in text:
             if ch == ZW0:

@@ -30,8 +30,10 @@ class DecoderPanel(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self._param_edits: dict[str, QLineEdit] = {}
+        self._param_edits: dict[str, QWidget] = {}
         self._param_labels: list[QLabel] = []
+        self._raw_output: str = ""
+        self._last_codec: CodecBase | None = None
         self._build_ui()
         self._on_codec_changed(0)
 
@@ -73,7 +75,7 @@ class DecoderPanel(QWidget):
         form.addRow(self.iv_label, self.iv_edit)
         form.addRow(self.alphabet_label, self.alphabet_edit)
         # 动态参数行(按算法 params 声明重建)
-        self._dyn_rows: list[tuple[QLabel, QLineEdit]] = []
+        self._dyn_rows: list[tuple[QLabel, QWidget]] = []
         self._dyn_form = form
         layout.addWidget(self.param_box)
 
@@ -90,7 +92,11 @@ class DecoderPanel(QWidget):
         out_head.addStretch()
         self.btn_copy = QPushButton("复制输出")
         self.btn_copy.clicked.connect(self._on_copy)
+        self.btn_copy_hex = QPushButton("复制 Hex")
+        self.btn_copy_hex.setToolTip("以十六进制复制原始输出字节,适合二进制结果")
+        self.btn_copy_hex.clicked.connect(self._on_copy_hex)
         out_head.addWidget(self.btn_copy)
+        out_head.addWidget(self.btn_copy_hex)
         layout.addLayout(out_head)
         self.output_edit = QPlainTextEdit()
         self.output_edit.setReadOnly(True)
@@ -112,6 +118,12 @@ class DecoderPanel(QWidget):
 
     def _on_codec_changed(self, _index: int) -> None:
         codec = self._current_codec()
+        # 切换算法时清空旧算法的密钥/IV/字母表,避免把旧值带给新算法
+        if self._last_codec is not None and codec is not self._last_codec:
+            self.key_edit.clear()
+            self.iv_edit.clear()
+            self.alphabet_edit.clear()
+        self._last_codec = codec
         # 固定行按能力声明显隐
         for label, edit, show, hint in (
             (self.key_label, self.key_edit, codec.need_key, codec.key_hint),
@@ -120,8 +132,7 @@ class DecoderPanel(QWidget):
         ):
             label.setVisible(show)
             edit.setVisible(show)
-            if hint:
-                edit.setPlaceholderText(hint)
+            edit.setPlaceholderText(hint)
         # 单向算法禁用解码按钮
         self.btn_decode.setEnabled(not codec.one_way)
         self.btn_decode.setToolTip("该算法为单向哈希,无法解码" if codec.one_way else "")
@@ -135,15 +146,32 @@ class DecoderPanel(QWidget):
             self._dyn_form.removeRow(label)
         self._dyn_rows.clear()
         self._param_edits.clear()
+        choices_map = getattr(codec, "param_choices", {})
         for name, label_text, default in codec.params:
             label = QLabel(label_text + ":")
-            edit = QLineEdit(default)
+            choices = choices_map.get(name)
+            if choices:
+                edit: QWidget = QComboBox()
+                for text, value in choices:
+                    edit.addItem(text, value)
+                index = edit.findData(default)
+                if index >= 0:
+                    edit.setCurrentIndex(index)
+            else:
+                edit = QLineEdit(default)
             self._dyn_form.addRow(label, edit)
             self._dyn_rows.append((label, edit))
             self._param_edits[name] = edit
 
     def _collect_params(self) -> dict[str, str]:
-        return {k: e.text() for k, e in self._param_edits.items()}
+        params: dict[str, str] = {}
+        for name, widget in self._param_edits.items():
+            if isinstance(widget, QComboBox):
+                data = widget.currentData()
+                params[name] = "" if data is None else str(data)
+            elif isinstance(widget, QLineEdit):
+                params[name] = widget.text()
+        return params
 
     # ---------------- 编解码操作 ----------------
     def _get_input(self) -> str | None:
@@ -159,18 +187,22 @@ class DecoderPanel(QWidget):
             return
         codec = self._current_codec()
         fn = codec.encode if direction == "encode" else codec.decode
+        kwargs: dict[str, str] = {}
+        if codec.need_key:
+            kwargs["key"] = self.key_edit.text()
+        if codec.need_iv:
+            kwargs["iv"] = self.iv_edit.text()
+        if codec.need_alphabet:
+            kwargs["alphabet"] = self.alphabet_edit.text()
         try:
-            out = fn(text,
-                     key=self.key_edit.text(),
-                     iv=self.iv_edit.text(),
-                     alphabet=self.alphabet_edit.text(),
-                     **self._collect_params())
+            out = fn(text, **kwargs, **self._collect_params())
         except CodecError as e:
             self._info(str(e))
             return
         except Exception as e:  # 兜底:任何意外都不允许崩溃
             self._info(f"操作失败:{e}\n输入可能不是合法的 {codec.name} 内容。")
             return
+        self._raw_output = out
         self.output_edit.setPlainText(self._display(out))
 
     def _on_encode(self) -> None:
@@ -189,6 +221,20 @@ class DecoderPanel(QWidget):
         from PySide6.QtCore import QTimer
         QTimer.singleShot(1200, lambda: self.btn_copy.setText("复制输出"))
 
+    def _on_copy_hex(self) -> None:
+        if not self._raw_output:
+            self._info("输出区为空,没有可复制的内容。")
+            return
+        try:
+            data = self._raw_output.encode("utf-8", errors="surrogateescape")
+        except UnicodeEncodeError:
+            # 极端情况下(未来 codec 返回非 surrogateescape 代理字符)也不崩
+            data = self._raw_output.encode("utf-8", errors="surrogatepass")
+        QGuiApplication.clipboard().setText(data.hex())
+        self.btn_copy_hex.setText("已复制 Hex ✓")
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(1200, lambda: self.btn_copy_hex.setText("复制 Hex"))
+
     # ---------------- 一键智能解码 ----------------
     def _on_smart(self) -> None:
         text = self._get_input()
@@ -205,7 +251,7 @@ class DecoderPanel(QWidget):
             self._info("未能识别出有效编码。\n可尝试手动选择算法,或检查输入是否完整。")
             return
         for hit in hits:
-            preview = hit.output.replace("\n", " ⏎ ")[:120]
+            preview = self._display(hit.output).replace("\n", " ⏎ ")[:120]
             item = QTreeWidgetItem([" → ".join(hit.path), preview, f"{hit.score:.2f}"])
             item.setData(0, Qt.UserRole, hit.output)
             self.result_tree.addTopLevelItem(item)
@@ -213,6 +259,7 @@ class DecoderPanel(QWidget):
     def _on_hit_double_clicked(self, item: QTreeWidgetItem, _col: int) -> None:
         out = item.data(0, Qt.UserRole)
         if out:
+            self._raw_output = out
             self.output_edit.setPlainText(self._display(out))
 
     # ---------------- 工具 ----------------
@@ -221,5 +268,5 @@ class DecoderPanel(QWidget):
 
     @staticmethod
     def _display(s: str) -> str:
-        """surrogateescape 字符替换为可见占位符,避免界面显示异常。"""
-        return s.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+        """把无法显示的代理区字符逐个替换为占位符,避免界面显示异常/异常崩溃。"""
+        return "".join("\ufffd" if 0xD800 <= ord(c) <= 0xDFFF else c for c in s)

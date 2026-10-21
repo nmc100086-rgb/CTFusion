@@ -16,8 +16,8 @@ _BF_TO_OOK = {
 _OOK_TO_BF = {v: k for k, v in _BF_TO_OOK.items()}
 
 
-def _run_bf(code: str) -> str:
-    """执行 Brainfuck,返回输出。cell 0-255 循环,',' 读入 0。"""
+def _run_bf(code: str) -> bytes:
+    """执行 Brainfuck,返回原始字节。cell 0-255 循环,',' 读入 0。"""
     cmds = [c for c in code if c in "><+-.,[]"]
     # 预计算括号跳转
     jump = {}
@@ -36,7 +36,7 @@ def _run_bf(code: str) -> str:
 
     tape = [0] * 30000
     ptr = pc = 0
-    out = []
+    out = bytearray()
     steps = 0
     while pc < len(cmds):
         steps += 1
@@ -56,7 +56,7 @@ def _run_bf(code: str) -> str:
         elif c == "-":
             tape[ptr] = (tape[ptr] - 1) & 0xFF
         elif c == ".":
-            out.append(chr(tape[ptr]))
+            out.append(tape[ptr])
         elif c == "[":
             if tape[ptr] == 0:
                 pc = jump[pc]
@@ -64,15 +64,14 @@ def _run_bf(code: str) -> str:
             if tape[ptr] != 0:
                 pc = jump[pc]
         pc += 1
-    return "".join(out)
+    return bytes(out)
 
 
-def _gen_bf(text: str) -> str:
-    """把文本编译为朴素 BF 程序(差值法,利用 256 回绕取最短方向)。"""
+def _gen_bf(data: bytes) -> str:
+    """把字节串编译为朴素 BF 程序(差值法,利用 256 回绕取最短方向)。"""
     cmds = []
     cur = 0
-    for ch in text:
-        target = ord(ch) & 0xFF
+    for target in data:
         diff = (target - cur) % 256
         cmds.append("+" * diff if diff <= 128 else "-" * (256 - diff))
         cmds.append(".")
@@ -89,10 +88,12 @@ class OokCodec(CodecBase):
     description = "Ook!(Brainfuck 同构),编码为 'OokX OokY' 词对"
 
     def encode(self, text: str, **p) -> str:
-        bf = _gen_bf(text)
+        bf = _gen_bf(self.to_bytes(text))
         return " ".join(_BF_TO_OOK[c] for c in bf)
 
     def decode(self, text: str, **p) -> str:
+        if not text.strip():
+            return ""
         tokens = re.findall(r"Ook[.?!]", text)
         if not tokens:
             raise CodecError("不是合法的 Ook!:未找到任何 'Ook. / Ook? / Ook!' 词")
@@ -104,7 +105,7 @@ class OokCodec(CodecBase):
             if pair not in _OOK_TO_BF:
                 raise CodecError(f"不是合法的 Ook!:无法识别的词对 {pair!r}")
             bf.append(_OOK_TO_BF[pair])
-        return _run_bf("".join(bf))
+        return self.to_text(_run_bf("".join(bf)))
 
 
 class BrainfuckCodec(CodecBase):
@@ -113,9 +114,11 @@ class BrainfuckCodec(CodecBase):
     description = "直接执行 Brainfuck 代码"
 
     def encode(self, text: str, **p) -> str:
-        return _gen_bf(text)
+        return _gen_bf(self.to_bytes(text))
 
     def decode(self, text: str, **p) -> str:
+        if not text.strip():
+            return ""
         if not any(c in text for c in "><+-.,[]"):
             raise CodecError("不是合法的 Brainfuck:未找到任何 BF 指令")
-        return _run_bf(text)
+        return self.to_text(_run_bf(text))
