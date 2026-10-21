@@ -305,14 +305,84 @@ class Base91Codec(CodecBase):
 class Base92Codec(CodecBase):
     name = "Base92"
     category = "Base 家族"
-    description = "可打印 ASCII(排除双引号)大数实现,与个别在线工具输出可能不同"
-    AL92 = "".join(chr(i) for i in range(33, 126) if i != 34)  # 92 字符
+    description = "官方 13 位分块 Base92(91 字符字母表),行业标准实现"
+    # 官方字母表: ! + #~_ (跳过双引号) + a~} 共 91 字符
+    AL92 = "!#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_abcdefghijklmnopqrstuvwxyz{|}"
 
     def encode(self, text: str, **p) -> str:
-        return _bigint_encode(self.to_bytes(text), self.AL92)
+        data = self.to_bytes(text)
+        if not data:
+            return "~"
+
+        bit_buffer = 0
+        bit_count = 0
+        out = []
+        for byte in data:
+            bit_buffer = (bit_buffer << 8) | byte
+            bit_count += 8
+            while bit_count >= 13:
+                chunk = bit_buffer >> (bit_count - 13)
+                bit_buffer &= (1 << (bit_count - 13)) - 1
+                bit_count -= 13
+                out.append(self.AL92[chunk // 91])
+                out.append(self.AL92[chunk % 91])
+
+        if bit_count > 0:
+            if bit_count < 7:
+                chunk = bit_buffer << (6 - bit_count)
+                out.append(self.AL92[chunk])
+            else:
+                chunk = bit_buffer << (13 - bit_count)
+                out.append(self.AL92[chunk // 91])
+                out.append(self.AL92[chunk % 91])
+
+        return "".join(out)
 
     def decode(self, text: str, **p) -> str:
-        return self.to_text(_bigint_decode(text, self.AL92, "Base92"))
+        s = _WS.sub("", text)
+        if not s:
+            raise CodecError("请输入 Base92 编码内容")
+        if s == "~":
+            return ""
+        if len(s) == 1:
+            raise CodecError("不是合法的 Base92:1 字符无法还原")
+
+        rev = {c: i for i, c in enumerate(self.AL92)}
+        bit_buffer = 0
+        bit_count = 0
+        out = bytearray()
+
+        # 成对处理
+        i = 0
+        while i < len(s) - 1:
+            c1, c2 = s[i], s[i + 1]
+            if c1 not in rev or c2 not in rev:
+                bad = c1 if c1 not in rev else c2
+                raise CodecError(f"不是合法的 Base92:包含非法字符 {bad!r}")
+            chunk = rev[c1] * 91 + rev[c2]
+            if chunk >= 8192:
+                raise CodecError("不是合法的 Base92:编码值越界")
+            bit_buffer = (bit_buffer << 13) | chunk
+            bit_count += 13
+            while bit_count >= 8:
+                out.append((bit_buffer >> (bit_count - 8)) & 0xFF)
+                bit_buffer &= (1 << (bit_count - 8)) - 1
+                bit_count -= 8
+            i += 2
+
+        # 末尾单字符(6 位填充)
+        if i < len(s):
+            c = s[i]
+            if c not in rev:
+                raise CodecError(f"不是合法的 Base92:末尾非法字符 {c!r}")
+            bit_buffer = (bit_buffer << 6) | rev[c]
+            bit_count += 6
+            while bit_count >= 8:
+                out.append((bit_buffer >> (bit_count - 8)) & 0xFF)
+                bit_buffer &= (1 << (bit_count - 8)) - 1
+                bit_count -= 8
+
+        return self.to_text(bytes(out))
 
 
 class Base100Codec(CodecBase):
