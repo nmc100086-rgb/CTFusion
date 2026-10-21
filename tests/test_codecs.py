@@ -163,6 +163,24 @@ class CodecRoundTripTests(unittest.TestCase):
             "FLAGWELCOMECOMETOCTF",
         )
 
+    def test_morse_braces_and_case(self):
+        morse = codec("摩斯电码")
+        plaintext = "flag{welcome come to ctf}"
+        encoded = morse.encode(plaintext)
+        self.assertIn("----.--", encoded)
+        self.assertIn("-----.-", encoded)
+        self.assertEqual(morse.decode(encoded), plaintext)
+        self.assertEqual(morse.decode(encoded, letter_case="upper"), plaintext.upper())
+        # 浏览器在线工具的输出(它不保留单词空格)
+        browser = ("..-. .-.. .- --. ----.-- .-- . .-.. -.-. --- -- . "
+                   "-.-. --- -- . - --- -.-. - ..-. -----.-")
+        self.assertEqual(morse.decode(browser), "flag{welcome come to ctf}")
+        self.assertEqual(morse.decode(browser, restore_spaces="0"),
+                         "flag{welcomecometoctf}")
+        # 兼容 Wells 扩展括号码
+        wells = "..-. .-.. .- --. .--.- .-- . .-.. -.-. --- -- . .--.--"
+        self.assertEqual(morse.decode(wells), "flag{welcome}")
+
     def test_rail_fence_standard_and_w(self):
         fence = codec("栅栏密码")
         # W 型:之字形

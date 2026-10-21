@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from functools import lru_cache
 
 from core.codecs.base import CodecBase, CodecError, readability
 
@@ -284,7 +285,24 @@ class BaconCodec(CodecBase):
 class MorseCodec(CodecBase):
     name = "摩斯电码"
     category = "古典密码"
-    description = "字母间空格分隔,单词间用 / 或多个空格"
+    description = (
+        "字母间空格分隔,单词间用 / 或多个空格;支持 {} 和扩展括号码,"
+        "解码默认小写;restore_spaces=1 会尝试还原 flag 内被浏览器省略的空格"
+    )
+    params = [
+        ("letter_case", "输出大小写(lower/upper)", "lower"),
+        ("restore_spaces", "还原单词空格(1/0)", "1"),
+    ]
+    param_choices = {
+        "letter_case": [
+            ("小写(lower)", "lower"),
+            ("大写(upper)", "upper"),
+        ],
+        "restore_spaces": [
+            ("开启(1)", "1"),
+            ("关闭(0)", "0"),
+        ],
+    }
 
     _TABLE = {
         "A": ".-", "B": "-...", "C": "-.-.", "D": "-..", "E": ".", "F": "..-.",
@@ -298,7 +316,28 @@ class MorseCodec(CodecBase):
         "/": "-..-.", "(": "-.--.", ")": "-.--.-", "&": ".-...", ":": "---...",
         ";": "-.-.-.", "=": "-...-", "+": ".-.-.", "-": "-....-", "_": "..--.-",
         '"': ".-..-.", "$": "...-..-", "@": ".--.-.",
+        # 浏览器在线 Morse 工具的括号映射(实测)
+        "{": "----.--", "}": "-----.-",
     }
+    # 常见扩展括号码(不同工具/表可能不同);解码时统一当作括号占位符,
+    # 再按出现顺序还原成 { / }。
+    _BRACE_CODES = {"----.--", "-----.-", ".--.-", ".--.--", "----.-"}
+
+    # 浏览器 Morse 会丢掉单词空格;这里用一个很小的词表做启发式还原。
+    _RESTORE_WORDS = {
+        "welcome", "come", "to", "the", "and", "is", "of", "in", "this", "that",
+        "hello", "world", "flag", "ctf", "good", "luck", "secret", "key",
+        "password", "decode", "encode", "misc", "easy", "hard",
+    }
+    _RESTORE_WORD_LIST = tuple(sorted(_RESTORE_WORDS, key=len, reverse=True))
+    _BRACE_MARK = "\x00"
+
+    @staticmethod
+    def _letter_case(params: dict) -> str:
+        raw = str(params.get("letter_case", "lower")).strip().lower()
+        if raw not in ("lower", "upper"):
+            raise CodecError("摩斯电码输出大小写仅支持 lower 或 upper")
+        return raw
 
     def encode(self, text: str, **p) -> str:
         words = []
@@ -311,8 +350,56 @@ class MorseCodec(CodecBase):
             words.append(" ".join(codes))
         return " / ".join(words)
 
+    @staticmethod
+    def _fill_braces(text: str) -> str:
+        positions = [i for i, ch in enumerate(text) if ch == MorseCodec._BRACE_MARK]
+        if not positions:
+            return text
+        chars = list(text)
+        if len(positions) == 1:
+            i = positions[0]
+            chars[i] = "}" if i > len(text) // 2 else "{"
+        else:
+            for n, i in enumerate(positions):
+                chars[i] = "{" if n % 2 == 0 else "}"
+        return "".join(chars)
+
+    @classmethod
+    def _segment_words(cls, s: str) -> list[str] | None:
+        n = len(s)
+
+        @lru_cache(maxsize=None)
+        def dfs(i: int):
+            if i == n:
+                return ()
+            for word in cls._RESTORE_WORD_LIST:
+                upper = word.upper()
+                if s.startswith(upper, i):
+                    tail = dfs(i + len(upper))
+                    if tail is not None:
+                        return (word,) + tail
+            return None
+
+        result = dfs(0)
+        return list(result) if result is not None else None
+
+    @classmethod
+    def _restore_spaces(cls, s: str) -> str:
+        """还原浏览器工具省略的 flag 单词空格(启发式,只处理常见词)。"""
+        if " " in s:
+            return s
+        match = re.fullmatch(r"(?i)(flag|ctf|key)\{([a-z]+)\}", s)
+        if not match:
+            return s
+        words = cls._segment_words(match.group(2).upper())
+        if not words:
+            return s
+        return f"{match.group(1).lower()}{{{' '.join(w.lower() for w in words)}}}"
+
     def decode(self, text: str, **p) -> str:
-        rev = {v: k for k, v in self._TABLE.items()}
+        rev = {v: k for k, v in self._TABLE.items() if k not in "{}"}
+        for code in self._BRACE_CODES:
+            rev[code] = self._BRACE_MARK
         text = text.strip()
         if not text:
             return ""
@@ -327,7 +414,10 @@ class MorseCodec(CodecBase):
                     raise CodecError(f"无法识别的摩斯码:{code!r}")
                 chars.append(rev[code])
             out.append("".join(chars))
-        return " ".join(out)
+        result = self._fill_braces(" ".join(out))
+        if _bool_param(p, "restore_spaces", True):
+            result = self._restore_spaces(result)
+        return result.lower() if self._letter_case(p) == "lower" else result.upper()
 
 
 class PigpenCodec(CodecBase):

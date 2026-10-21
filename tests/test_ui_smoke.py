@@ -116,6 +116,18 @@ class DecoderPanelSmokeTests(unittest.TestCase):
         self.select("栅栏密码")
         self.assertIsInstance(self.panel._param_edits["fence_type"], QComboBox)
         self.assertIsInstance(self.panel._param_edits["rails"], QLineEdit)
+        self.select("摩斯电码")
+        self.assertIsInstance(self.panel._param_edits["letter_case"], QComboBox)
+        self.assertIsInstance(self.panel._param_edits["restore_spaces"], QComboBox)
+
+    def test_morse_ui_braces_and_lowercase(self):
+        self.select("摩斯电码")
+        self.panel.input_edit.setPlainText(
+            "..-. .-.. .- --. ----.-- .-- . .-.. -.-. --- -- . / "
+            "-.-. --- -- . / - --- / -.-. - ..-. -----.-"
+        )
+        self.panel._on_decode()
+        self.assertEqual(self.panel.output_edit.toPlainText(), "flag{welcome come to ctf}")
 
     def test_rail_fence_dropdown(self):
         self.select("栅栏密码")
