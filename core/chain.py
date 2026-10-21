@@ -24,6 +24,7 @@ _CHARSET = {
     "Base62": set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"),
     "Base64": set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="),
     "Base85": set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"),
+    "Ascii85": set("!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstu"),
     "Base91": set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\""),
     "Base92": set("!#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_abcdefghijklmnopqrstuvwxyz{|}"),
     "URL 编码": set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~%"),
@@ -31,7 +32,7 @@ _CHARSET = {
 }
 
 # 高置信度编码(命中字符集即扩展)
-_HIGH_CONFIDENCE = {"Base16", "Base32", "Base58", "Base62", "Base64", "Base85", "Base91", "Base92"}
+_HIGH_CONFIDENCE = {"Base16", "Base32", "Base58", "Base62", "Base64", "Base85", "Ascii85", "Base91", "Base92"}
 
 
 def _looks_like(text: str, codec_name: str) -> float:

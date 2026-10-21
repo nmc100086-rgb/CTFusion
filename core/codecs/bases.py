@@ -227,9 +227,9 @@ class Base64Codec(_StdBase):
 class Base85Codec(_StdBase):
     name = "Base85"
     category = "Base 家族"
-    description = "git 风格 Base85(RFC 1924 变体)"
+    description = "RFC 1924 Base85(不含逗号/句号/斜杠),与 Python base64.b85decode 兼容"
     STD = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
-    alphabet_hint = "留空使用标准 85 字符字母表"
+    alphabet_hint = "留空使用 RFC 1924 标准 85 字符字母表"
 
     def encode(self, text: str, alphabet: str = "", **p) -> str:
         table = self._check_alphabet(alphabet)
@@ -239,11 +239,45 @@ class Base85Codec(_StdBase):
     def decode(self, text: str, alphabet: str = "", **p) -> str:
         table = self._check_alphabet(alphabet)
         s = _WS.sub("", text)
+        if not s:
+            raise CodecError("请输入 Base85 编码内容")
+        charset = set(table)
+        for ch in s:
+            if ch not in charset:
+                raise CodecError(f"不是合法的 Base85:包含非法字符 {ch!r}(注意:逗号/句号/斜杠属于 Ascii85 变体)")
         s = self._translate(s, table, self.STD)
         try:
             return self.to_text(base64.b85decode(s))
         except (binascii.Error, ValueError) as e:
             raise CodecError(f"不是合法的 Base85:{e}")
+
+
+class Ascii85Codec(CodecBase):
+    """Adobe 原始 Ascii85:字母表从 '!' (33) 到 'u' (117) 连续 85 字符,
+    包含逗号/句号/斜杠;算法与 Base85 相同(4 字节 -> 5 字符),
+    Python 标准库 base64.a85encode/decode 即此版本。"""
+
+    name = "Ascii85"
+    category = "Base 家族"
+    description = "Adobe 原始 Ascii85,含逗号/句号/斜杠;与 RFC 1924 Base85 是两种不同字母表"
+    STD = '!"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstu'
+
+    def encode(self, text: str, **p) -> str:
+        return base64.a85encode(self.to_bytes(text)).decode()
+
+    def decode(self, text: str, **p) -> str:
+        s = _WS.sub("", text)
+        s = s.strip("<>~").strip()
+        if not s:
+            return ""
+        charset = set(self.STD)
+        for ch in s:
+            if ch not in charset:
+                raise CodecError(f"不是合法的 Ascii85:包含非法字符 {ch!r}")
+        try:
+            return self.to_text(base64.a85decode(s))
+        except (binascii.Error, ValueError) as e:
+            raise CodecError(f"不是合法的 Ascii85:{e}")
 
 
 class Base91Codec(CodecBase):
@@ -382,28 +416,4 @@ class Base92Codec(CodecBase):
                 bit_buffer &= (1 << (bit_count - 8)) - 1
                 bit_count -= 8
 
-        return self.to_text(bytes(out))
-
-
-class Base100Codec(CodecBase):
-    name = "Base100"
-    category = "Base 家族"
-    description = "每字节映射为一个 emoji(U+1F300 起)"
-
-    def encode(self, text: str, **p) -> str:
-        out = bytearray()
-        for b in self.to_bytes(text):
-            out += bytes([0xF0, 0x9F, 0x8C + (b >> 6), 0x80 + (b & 0x3F)])
-        return out.decode("utf-8")
-
-    def decode(self, text: str, **p) -> str:
-        raw = text.replace("\n", "").replace(" ", "").encode("utf-8")
-        if len(raw) % 4:
-            raise CodecError("不是合法的 Base100:长度不是 4 的倍数")
-        out = bytearray()
-        for i in range(0, len(raw), 4):
-            f0, f1, f2, f3 = raw[i:i + 4]
-            if f0 != 0xF0 or f1 != 0x9F or not (0x8C <= f2 <= 0x8F) or not (0x80 <= f3 <= 0xBF):
-                raise CodecError("不是合法的 Base100:包含非 emoji 编码字符")
-            out.append(((f2 - 0x8C) << 6) | (f3 - 0x80))
         return self.to_text(bytes(out))
