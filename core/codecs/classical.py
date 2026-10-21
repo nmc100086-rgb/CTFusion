@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import re
 from functools import lru_cache
 
@@ -253,10 +252,12 @@ class RailFenceCodec(CodecBase):
 class RouteCodec(CodecBase):
     name = "曲路密码"
     category = "古典密码"
-    description = "按行写入矩阵、按列读出;长度不足补 X;默认解码去掉末尾 X(明文本身以 X 结尾时请把 strip_padding 设为 0)"
+    description = (
+        "按行写入 col 列网格,从最后一列开始蛇形(上下交替)读出;"
+        "明文删去空格(空格不参与路径),密文中的空格同样忽略"
+    )
     params = [
         ("cols", "列数(>=2)", "5"),
-        ("strip_padding", "去除末尾填充X(1/0)", "1"),
     ]
 
     def _cols(self, params: dict) -> int:
@@ -272,22 +273,39 @@ class RouteCodec(CodecBase):
 
     def encode(self, text: str, **params) -> str:
         cols = self._cols(params)
-        n = len(text)
-        rows = math.ceil(n / cols)
-        padded = text + "X" * (rows * cols - n)
-        return "".join(padded[r * cols + c] for c in range(cols) for r in range(rows))
+        text = re.sub(r"\s+", "", text)  # 空格不参与路径
+        # 按行写入 col 列网格(第 i 个字符进第 i%cols 列)
+        grid = [[] for _ in range(cols)]
+        for i, ch in enumerate(text):
+            grid[i % cols].append(ch)
+        # 列顺序反转后,偶数位置的列内容再反转 => 从最后一列开始蛇形读出
+        out = []
+        for idx, col_chars in enumerate(reversed(grid)):
+            if idx % 2 == 0:
+                col_chars = col_chars[::-1]
+            out.append("".join(col_chars))
+        return "".join(out)
 
     def decode(self, text: str, **params) -> str:
         cols = self._cols(params)
+        text = re.sub(r"\s+", "", text)  # 密文中用于分组的空格忽略
         n = len(text)
-        if n % cols:
-            raise CodecError(f"密文长度({n})不是列数({cols})的整数倍,无法还原")
-        rows = n // cols
-        # 密文按列存储,还原回行
-        out = "".join(text[c * rows + r] for r in range(rows) for c in range(cols))
-        if _bool_param(params, "strip_padding", True):
-            out = out.rstrip("X")
-        return out
+        min_row = n // cols          # 最短列的字符数
+        min_num = cols - n % cols    # 最短列的个数(密文中排在前面)
+        # 按加密时的输出顺序分组:短列在前,长列在后
+        groups = []
+        pos = 0
+        for i in range(cols):
+            size = min_row if i < min_num else min_row + 1
+            groups.append(text[pos:pos + size])
+            pos += size
+        # 撤销偶数位置反转,再恢复原始列顺序
+        for i in range(cols):
+            if i % 2 == 0:
+                groups[i] = groups[i][::-1]
+        groups.reverse()
+        # 按行读出
+        return "".join(groups[i % cols][i // cols] for i in range(n))
 
 
 class BaconCodec(CodecBase):
@@ -482,8 +500,8 @@ class PigpenCodec(CodecBase):
     name = "猪圈密码"
     category = "古典密码"
     description = (
-        "猪圈密码(浏览器近似符号);支持斜杠/空格/不分隔三种符号分隔,"
-        "以及是否保留非字母字符"
+        "标准猪圈密码符号(A-I 九宫格、J-R 九宫格带点、S-V X 形网格、W-Z X 形带点);"
+        "支持斜杠/空格/不分隔三种符号分隔,以及是否保留非字母字符"
     )
     params = [
         ("separator", "符号分隔", "/"),
@@ -498,16 +516,17 @@ class PigpenCodec(CodecBase):
     }
     param_bool = {"keep_nonletters"}
 
-    # 与截图中的浏览器工具保持一致的符号(实测)
+    # 标准猪圈密码对照表:
+    # A-I 九宫格(无点),J-R 同形加中点,S-V X 形网格,W-Z 同形加中点
     _TABLE = {
-        "A": "┌", "B": "┬", "C": "└",
-        "D": "Ɔ", "E": "□", "F": "Ɛ",
-        "G": "┘", "H": "┴", "I": "┐",
-        "J": "┌•", "K": "┬•", "L": "└•",
-        "M": "Ɔ•", "N": "□•", "O": "Ɛ•",
-        "P": "┘•", "Q": "┴•", "R": "┐•",
-        "S": "∧", "T": ">", "U": "<", "V": "∨",
-        "W": "∨•", "X": "∧•", "Y": "<•", "Z": ">•",
+        "A": "┘", "B": "⊔", "C": "└",
+        "D": "⊐", "E": "□", "F": "⊏",
+        "G": "┐", "H": "⊓", "I": "┌",
+        "J": "┘•", "K": "⊔•", "L": "└•",
+        "M": "⊐•", "N": "□•", "O": "⊏•",
+        "P": "┐•", "Q": "⊓•", "R": "┌•",
+        "S": "∨", "T": ">", "U": "<", "V": "∧",
+        "W": "∨•", "X": ">•", "Y": "<•", "Z": "∧•",
     }
 
     @staticmethod

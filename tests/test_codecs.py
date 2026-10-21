@@ -95,10 +95,28 @@ class CodecRoundTripTests(unittest.TestCase):
         self.assertEqual(c.encode("FF", from_base="16", to_base="10"), "255")
         self.assertEqual(c.decode("255", from_base="16", to_base="10"), "FF")
 
-    def test_route_and_hill_strip_padding(self):
+    def test_route_serpentine_and_hill_strip_padding(self):
         route = codec("曲路密码")
+        # 空格不参与路径:编码前剔除,解码结果不含空格
         self.assertEqual(route.decode(route.encode("Hello, World!", cols="5"), cols="5"),
-                         "Hello, World!")
+                         "Hello,World!")
+        # 与 CTF 社区参考实现(encrypt_bend)对齐:列反转 + 蛇形交替,无填充
+        self.assertEqual(route.encode("i will beat you this day", cols="7"),
+                         "hebtyulloadyiwtsiai")
+        self.assertEqual(route.decode("hebtyulloadyiwtsiai", cols="7"),
+                         "iwillbeatyouthisday")
+        # 教程示例(明文去空格后 5x7 网格)
+        self.assertEqual(
+            route.encode("The quick brown fox jumps over the lazy dog", cols="7"),
+            "gesfcinphodtmwuqouryzejrehbxvalookT")
+        # 密文中用于分组的空格同样忽略
+        self.assertEqual(
+            route.decode("gesfc inpho dtmwu qoury zejre hbxva lookT", cols="7"),
+            "Thequickbrownfoxjumpsoverthelazydog")
+        # 长度 < 列数 / 长度非列数整数倍 也无需补齐
+        self.assertEqual(route.decode(route.encode("ABC", cols="5"), cols="5"), "ABC")
+        self.assertEqual(route.decode(route.encode("ABCDEFG", cols="3"), cols="3"),
+                         "ABCDEFG")
 
         hill = codec("Hill 密码")
         self.assertEqual(hill.decode(hill.encode("HELLO", key="3,3,2,5"), key="3,3,2,5"),
@@ -242,9 +260,9 @@ class CodecRoundTripTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             codec("放射密码")
 
-    def test_pigpen_browser_mapping_and_separators(self):
+    def test_pigpen_standard_mapping_and_separators(self):
         pigpen = codec("猪圈密码")
-        expected = "Ɛ/└•/┌/┘/∨•/□/└•/└/Ɛ•/Ɔ•/□/└/Ɛ•/Ɔ•/□/>/Ɛ•/└/>/Ɛ"
+        expected = "⊏/└•/┘/┐/∨•/□/└•/└/⊏•/⊐•/□/└/⊏•/⊐•/□/>/⊏•/└/>/⊏"
         encoded = pigpen.encode("flag{welcome come to ctf}", separator="/",
                                 keep_nonletters="0")
         self.assertEqual(encoded, expected)
@@ -255,11 +273,11 @@ class CodecRoundTripTests(unittest.TestCase):
         # 空格分隔
         self.assertEqual(
             pigpen.encode("HELLO", separator=" ", keep_nonletters="0"),
-            "┴ □ └• └• Ɛ•",
+            "⊓ □ └• └• ⊏•",
         )
         # 不分隔
         compact = pigpen.encode("HELLO", separator="", keep_nonletters="0")
-        self.assertEqual(compact, "┴□└•└•Ɛ•")
+        self.assertEqual(compact, "⊓□└•└•⊏•")
         self.assertEqual(pigpen.decode(compact, separator="", keep_nonletters="0"),
                          "HELLO")
         # 保留非字母

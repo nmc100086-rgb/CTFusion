@@ -119,7 +119,7 @@ class DecoderPanelSmokeTests(unittest.TestCase):
         for name in ("char_mode", "mode", "restore", "strip_padding"):
             self.assertIsInstance(self.panel._param_edits[name], QComboBox)
         self.select("曲路密码")
-        self.assertIn("strip_padding", self.panel._param_edits)
+        self.assertIn("cols", self.panel._param_edits)
         self.select("栅栏密码")
         self.assertIsInstance(self.panel._param_edits["fence_type"], QComboBox)
         self.assertIsInstance(self.panel._param_edits["rails"], QLineEdit)
@@ -203,13 +203,13 @@ class DecoderPanelSmokeTests(unittest.TestCase):
         self.panel._on_encode()
         self.assertEqual(
             self.panel.output_edit.toPlainText(),
-            "Ɛ/└•/┌/┘/∨•/□/└•/└/Ɛ•/Ɔ•/□/└/Ɛ•/Ɔ•/□/>/Ɛ•/└/>/Ɛ",
+            "⊏/└•/┘/┐/∨•/□/└•/└/⊏•/⊐•/□/└/⊏•/⊐•/□/>/⊏•/└/>/⊏",
         )
 
         separator.setCurrentIndex(separator.findData(" "))
         self.panel.input_edit.setPlainText("HELLO")
         self.panel._on_encode()
-        self.assertEqual(self.panel.output_edit.toPlainText(), "┴ □ └• └• Ɛ•")
+        self.assertEqual(self.panel.output_edit.toPlainText(), "⊓ □ └• └• ⊏•")
 
     def test_affine_ui(self):
         self.select("仿射密码")
