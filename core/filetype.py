@@ -78,6 +78,25 @@ class TrailingData:
 
 
 @dataclass
+class HeaderCheck:
+    """文件头检测结果:实际字节 vs 期望 magic。"""
+
+    offset: int
+    expected: bytes
+    actual: bytes
+    matched: bool
+    name: str = ""
+
+    @property
+    def expected_hex(self) -> str:
+        return " ".join(f"{b:02X}" for b in self.expected) or "(未知)"
+
+    @property
+    def actual_hex(self) -> str:
+        return " ".join(f"{b:02X}" for b in self.actual)
+
+
+@dataclass
 class IdentifyResult:
     filename: str
     size: int
@@ -87,6 +106,7 @@ class IdentifyResult:
     real_ext: str = ""
     ext_ok: bool = True
     trailing: TrailingData | None = None
+    header: HeaderCheck | None = None
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -156,6 +176,17 @@ def identify(data: bytes, filename: str = "") -> IdentifyResult:
         # 高熵提示
         if len(data) > 256 and fileparse_entropy(data[:65536]) > 7.5:
             result.notes.append("前 64KB 熵值 >7.5,疑似加密/压缩数据")
+
+    # 文件头检测:命中签名时给出期望 magic 与实际字节
+    if hits:
+        primary = hits[0]
+        result.header = HeaderCheck(
+            primary.offset, primary.magic,
+            data[primary.offset:primary.offset + len(primary.magic)],
+            True, primary.name,
+        )
+    else:
+        result.header = HeaderCheck(0, b"", data[:16], False, result.real_name)
 
     # 尾随数据检测
     kind = _PARSE_KIND.get(result.real_name)

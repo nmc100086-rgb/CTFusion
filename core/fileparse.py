@@ -301,6 +301,391 @@ def parse_zip(data: bytes) -> tuple[list[Node], int]:
     return nodes, end
 
 
+# ---------------------------------------------------------------- PNG 信息与修复
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+@dataclass
+class PngChunk:
+    name: str
+    offset: int
+    length: int
+    body: bytes
+    stored_crc: int | None
+    calc_crc: int | None
+    complete: bool
+
+    @property
+    def crc_ok(self) -> bool:
+        return self.stored_crc is not None and self.stored_crc == self.calc_crc
+
+    @property
+    def total_size(self) -> int:
+        return 8 + self.length + (4 if self.complete else 0)
+
+
+@dataclass
+class PngInfo:
+    width: int = 0
+    height: int = 0
+    bit_depth: int = 0
+    color_type: int = -1
+    interlace: int = 0
+    chunk_count: int = 0
+    idat_size: int = 0
+    crc_errors: list[PngChunk] = field(default_factory=list)
+    truncated: bool = False
+
+    @property
+    def color_name(self) -> str:
+        return _PNG_COLOR.get(self.color_type, f"类型{self.color_type}")
+
+    @property
+    def channels(self) -> int:
+        return {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(self.color_type, 1)
+
+
+def png_chunks(data: bytes) -> list[PngChunk]:
+    """按 chunk 拆分 PNG(含 CRC 校验结果),用于信息展示与修复。"""
+    chunks: list[PngChunk] = []
+    if data[:8] != PNG_SIGNATURE:
+        return chunks
+    pos = 8
+    while pos + 8 <= len(data):
+        length = _u32be(data, pos)
+        name = data[pos + 4:pos + 8].decode("latin-1")
+        body_end = pos + 8 + length
+        if body_end + 4 > len(data):
+            chunks.append(PngChunk(name, pos, max(0, len(data) - pos - 8),
+                                   data[pos + 8:body_end], None, None, False))
+            break
+        body = data[pos + 8:body_end]
+        stored = _u32be(data, body_end)
+        calc = zlib.crc32(data[pos + 4:body_end]) & 0xFFFFFFFF
+        chunks.append(PngChunk(name, pos, length, body, stored, calc, True))
+        pos = body_end + 4
+        if name == "IEND":
+            break
+    return chunks
+
+
+def png_info(data: bytes) -> PngInfo | None:
+    """读取 PNG 基本参数并校验所有 chunk 的 CRC。"""
+    if data[:8] != PNG_SIGNATURE:
+        return None
+    info = PngInfo()
+    for chunk in png_chunks(data):
+        info.chunk_count += 1
+        if not chunk.complete:
+            info.truncated = True
+        if chunk.stored_crc is not None and chunk.stored_crc != chunk.calc_crc:
+            info.crc_errors.append(chunk)
+        if chunk.name == "IHDR" and len(chunk.body) >= 13:
+            info.width = _u32be(chunk.body, 0)
+            info.height = _u32be(chunk.body, 4)
+            info.bit_depth = chunk.body[8]
+            info.color_type = chunk.body[9]
+            info.interlace = chunk.body[12]
+        elif chunk.name == "IDAT":
+            info.idat_size += chunk.length
+    return info
+
+
+def repair_png_crc(data: bytes) -> bytes:
+    """重算所有 chunk 的 CRC;截断 chunk 之后的原始数据原样保留。"""
+    if data[:8] != PNG_SIGNATURE:
+        return data
+    out = bytearray(PNG_SIGNATURE)
+    consumed = 8
+    for chunk in png_chunks(data):
+        if not chunk.complete:
+            out.extend(data[chunk.offset:])
+            consumed = len(data)
+            break
+        out.extend(struct.pack(">I", chunk.length))
+        out.extend(chunk.name.encode("latin-1"))
+        out.extend(chunk.body)
+        out.extend(struct.pack(">I", chunk.calc_crc or 0))
+        consumed = chunk.offset + chunk.total_size
+    out.extend(data[consumed:])
+    return bytes(out)
+
+
+def repair_png_dimensions(data: bytes, width: int, height: int) -> bytes:
+    """改写 IHDR 宽高并重算 IHDR 的 CRC。"""
+    if data[:8] != PNG_SIGNATURE:
+        return data
+    ihdr = next((c for c in png_chunks(data)
+                 if c.name == "IHDR" and c.complete and c.length >= 13), None)
+    if ihdr is None:
+        return data
+    out = bytearray(data)
+    body = ihdr.offset + 8
+    out[body:body + 4] = int(width).to_bytes(4, "big")
+    out[body + 4:body + 8] = int(height).to_bytes(4, "big")
+    crc = zlib.crc32(bytes(out[ihdr.offset + 4:ihdr.offset + 8 + ihdr.length])) & 0xFFFFFFFF
+    crc_pos = ihdr.offset + 8 + ihdr.length
+    out[crc_pos:crc_pos + 4] = crc.to_bytes(4, "big")
+    return bytes(out)
+
+
+def png_actual_size(data: bytes) -> tuple[int, int] | None:
+    """解压 IDAT 推算真实像素行数,用于发现被改小的 IHDR 宽高。"""
+    info = png_info(data)
+    if info is None or info.width <= 0 or info.bit_depth == 0 or info.interlace != 0:
+        return None
+    compressed = bytearray()
+    for chunk in png_chunks(data):
+        if chunk.name == "IDAT" and chunk.complete:
+            compressed.extend(chunk.body)
+    if not compressed:
+        return None
+    try:
+        pixels = zlib.decompressobj().decompress(bytes(compressed), 64 * 1024 * 1024)
+    except zlib.error:
+        return None
+    if not pixels:
+        return None
+    stride = (info.width * info.channels * info.bit_depth + 7) // 8 + 1
+    rows = len(pixels) // stride
+    if rows <= 0:
+        return None
+    return (info.width, rows)
+
+
+# ---------------------------------------------------------------- EXIF
+_EXIF_TAGS = {
+    0x0100: "图像宽度", 0x0101: "图像高度", 0x010E: "图像描述",
+    0x010F: "制造商", 0x0110: "型号", 0x0112: "方向",
+    0x011A: "X 分辨率", 0x011B: "Y 分辨率", 0x011C: "压缩方式",
+    0x0128: "分辨率单位", 0x0131: "软件", 0x0132: "修改时间",
+    0x013B: "作者", 0x8298: "版权", 0x829A: "曝光时间",
+    0x829D: "光圈值", 0x8822: "曝光程序", 0x8827: "ISO",
+    0x9000: "Exif 版本", 0x9003: "拍摄时间", 0x9004: "数字化时间",
+    0x9201: "快门速度", 0x9202: "光圈", 0x9209: "闪光灯",
+    0x920A: "焦距", 0x9286: "用户注释", 0xA002: "像素宽度",
+    0xA003: "像素高度",
+}
+
+_EXIF_TYPE_SIZE = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1,
+                   8: 2, 9: 4, 10: 8, 11: 4, 12: 8}
+
+
+def _find_exif_tiff(data: bytes) -> bytes | None:
+    pos = 2 if data[:2] == b"\xff\xd8" else 0
+    while pos + 4 <= len(data):
+        if data[pos] != 0xFF:
+            pos += 1
+            continue
+        marker = data[pos + 1]
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            pos += 2
+            continue
+        if marker == 0xD9:
+            break
+        length = _u16be(data, pos + 2)
+        if pos + 2 + length > len(data):
+            break
+        if marker == 0xE1 and data[pos + 4:pos + 10] == b"Exif\x00\x00":
+            return data[pos + 10:pos + 2 + length]
+        if marker == 0xDA:
+            break
+        pos += 2 + length
+    return None
+
+
+def _read_ifd(tiff: bytes, offset: int, order: str) -> list[tuple[int, int, int, bytes]]:
+    entries: list[tuple[int, int, int, bytes]] = []
+    if offset + 2 > len(tiff):
+        return entries
+    count = int.from_bytes(tiff[offset:offset + 2], order)
+    pos = offset + 2
+    for _ in range(min(count, 512)):
+        if pos + 12 > len(tiff):
+            break
+        tag = int.from_bytes(tiff[pos:pos + 2], order)
+        typ = int.from_bytes(tiff[pos + 2:pos + 4], order)
+        num = int.from_bytes(tiff[pos + 4:pos + 8], order)
+        size = _EXIF_TYPE_SIZE.get(typ, 1) * num
+        if size <= 4:
+            raw = tiff[pos + 8:pos + 8 + size]
+        else:
+            voff = int.from_bytes(tiff[pos + 8:pos + 12], order)
+            raw = tiff[voff:voff + size]
+        entries.append((tag, typ, num, raw))
+        pos += 12
+    return entries
+
+
+def _format_exif_value(typ: int, count: int, raw: bytes, order: str) -> str:
+    if typ == 2:
+        return raw.split(b"\x00")[0].decode("utf-8", "replace").strip()
+    if typ in (3, 8):
+        return ", ".join(str(int.from_bytes(raw[i:i + 2], order))
+                         for i in range(0, len(raw) - 1, 2))
+    if typ in (4, 9):
+        return ", ".join(str(int.from_bytes(raw[i:i + 4], order))
+                         for i in range(0, len(raw) - 3, 4))
+    if typ == 5:
+        vals = []
+        for i in range(0, len(raw) - 7, 8):
+            num = int.from_bytes(raw[i:i + 4], order)
+            den = int.from_bytes(raw[i + 4:i + 8], order)
+            vals.append(f"{num / den:g}" if den else f"{num}/0")
+        return ", ".join(vals)
+    return raw[:32].hex(" ")
+
+
+def parse_exif(data: bytes) -> list[tuple[str, str]]:
+    """解析 JPEG APP1 中的 TIFF/EXIF 常用标签。"""
+    tiff = _find_exif_tiff(data)
+    if not tiff or len(tiff) < 8 or tiff[:2] not in (b"II", b"MM"):
+        return []
+    order = "little" if tiff[:2] == b"II" else "big"
+    if int.from_bytes(tiff[2:4], order) != 42:
+        return []
+    rows: list[tuple[str, str]] = []
+    exif_off = 0
+    for tag, typ, num, raw in _read_ifd(tiff, int.from_bytes(tiff[4:8], order), order):
+        if tag == 0x8769:
+            exif_off = int.from_bytes(raw[:4], order)
+            continue
+        name = _EXIF_TAGS.get(tag)
+        if name:
+            rows.append((name, _format_exif_value(typ, num, raw, order)))
+    if exif_off:
+        for tag, typ, num, raw in _read_ifd(tiff, exif_off, order):
+            name = _EXIF_TAGS.get(tag)
+            if name:
+                rows.append((name, _format_exif_value(typ, num, raw, order)))
+    return rows
+
+
+# ---------------------------------------------------------------- GIF 帧
+def gif_frame_offsets(data: bytes) -> list[int]:
+    """返回每个图像描述符(帧)的偏移。"""
+    offsets: list[int] = []
+    if len(data) < 13 or data[:6] not in (b"GIF87a", b"GIF89a"):
+        return offsets
+    packed = data[10]
+    pos = 13
+    if packed & 0x80:
+        pos += 3 * (2 ** ((packed & 7) + 1))
+    while pos < len(data):
+        block = data[pos]
+        if block == 0x3B:
+            break
+        if block == 0x21:
+            pos = _gif_skip_subblocks(data, pos + 2)
+            continue
+        if block == 0x2C:
+            if pos + 10 > len(data):
+                break
+            offsets.append(pos)
+            ipacked = data[pos + 9]
+            nxt = pos + 10
+            if ipacked & 0x80:
+                nxt += 3 * (2 ** ((ipacked & 7) + 1))
+            pos = _gif_skip_subblocks(data, nxt + 1)
+            continue
+        pos += 1
+    return offsets
+
+
+# ---------------------------------------------------------------- 图片基本信息
+def image_info(kind: str, data: bytes) -> list[tuple[str, str]]:
+    """按格式返回可直接展示的 (项目, 值) 列表。"""
+    if kind == "PNG":
+        info = png_info(data)
+        if info is None:
+            return []
+        rows = [
+            ("格式", "PNG"),
+            ("尺寸", f"{info.width} x {info.height}"),
+            ("位深", f"{info.bit_depth} bit/通道"),
+            ("颜色类型", f"{info.color_type} ({info.color_name})"),
+            ("隔行扫描", "是 (Adam7)" if info.interlace else "否"),
+            ("Chunk 数量", str(info.chunk_count)),
+            ("IDAT 压缩数据", f"{info.idat_size:,} 字节"),
+            ("CRC 校验", f"{len(info.crc_errors)} 个 chunk 错误"
+             if info.crc_errors else "全部通过"),
+        ]
+        if info.truncated:
+            rows.append(("⚠ 截断", "存在长度字段超出文件末尾的 chunk"))
+        actual = png_actual_size(data)
+        if actual:
+            same = actual == (info.width, info.height)
+            rows.append(("实际像素尺寸", f"{actual[0]} x {actual[1]}"
+                         + ("" if same else " ⚠ 与 IHDR 不符")))
+        return rows
+    if kind == "JPEG":
+        width = height = 0
+        dpi = ""
+        segments = 0
+        has_exif = False
+        pos = 2
+        while pos + 4 <= len(data):
+            if data[pos] != 0xFF:
+                pos += 1
+                continue
+            marker = data[pos + 1]
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                pos += 2
+                continue
+            if marker == 0xD9:
+                break
+            length = _u16be(data, pos + 2)
+            if pos + 2 + length > len(data):
+                break
+            segments += 1
+            if marker == 0xE1 and data[pos + 4:pos + 10] == b"Exif\x00\x00":
+                has_exif = True
+            if marker in (0xC0, 0xC1, 0xC2) and pos + 9 <= len(data):
+                height = _u16be(data, pos + 5)
+                width = _u16be(data, pos + 7)
+            if marker == 0xE0 and data[pos + 4:pos + 9] == b"JFIF\x00" and pos + 14 <= len(data):
+                unit = data[pos + 11]
+                xd = _u16be(data, pos + 12)
+                if unit == 1:
+                    dpi = f"{xd} DPI"
+                elif unit == 2:
+                    dpi = f"{xd} 像素/cm"
+            if marker == 0xDA:
+                break
+            pos += 2 + length
+        rows = [("格式", "JPEG"), ("尺寸", f"{width} x {height}" if width else "未知")]
+        if dpi:
+            rows.append(("分辨率", dpi))
+        rows.append(("EXIF", "有" if has_exif else "无"))
+        rows.append(("段数量(至 SOS)", str(segments)))
+        return rows
+    if kind == "GIF":
+        if len(data) < 13:
+            return []
+        packed = data[10]
+        rows = [
+            ("格式", data[:6].decode("latin-1")),
+            ("尺寸", f"{_u16le(data, 6)} x {_u16le(data, 8)}"),
+            ("帧数", str(len(gif_frame_offsets(data)))),
+            ("全局色表", f"{2 ** ((packed & 7) + 1)} 色" if packed & 0x80 else "无"),
+        ]
+        return rows
+    if kind == "BMP":
+        if len(data) < 54:
+            return []
+        w = int.from_bytes(data[18:22], "little", signed=True)
+        h = int.from_bytes(data[22:26], "little", signed=True)
+        return [
+            ("格式", "BMP"),
+            ("尺寸", f"{abs(w)} x {abs(h)}"),
+            ("位深", f"{_u16le(data, 28)} bit"),
+            ("压缩方式", str(_u32le(data, 30))),
+            ("像素数据偏移", f"0x{_u32le(data, 10):X}"),
+            ("文件头声明大小", f"{_u32le(data, 2):,} 字节"),
+        ]
+    return []
+
+
 # ---------------------------------------------------------------- 分发
 _PARSERS = {
     "PNG": parse_png,

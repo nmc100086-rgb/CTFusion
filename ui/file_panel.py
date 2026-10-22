@@ -1,4 +1,4 @@
-"""文件分析页签:类型识别、结构解析、字符串、熵图与 Hex 查看器。"""
+"""文件分析页签:类型识别、文件头检测、结构解析、字符串、熵图与可编辑 Hex。"""
 
 from __future__ import annotations
 
@@ -67,8 +67,8 @@ class EntropyPlot(QWidget):
                          f"{len(self._blocks)} 块 | 均值 {sum(self._blocks) / len(self._blocks):.2f} bit/byte")
 
 
-class StegoPanel(QWidget):
-    """文件分析 + 图片隐写页签。"""
+class FilePanel(QWidget):
+    """文件分析页签。"""
 
     MAX_STRINGS = 5000
 
@@ -88,8 +88,11 @@ class StegoPanel(QWidget):
         self.btn_open = QPushButton("打开文件…")
         self.btn_open.clicked.connect(self._choose_file)
         bar.addWidget(self.btn_open)
-        self.file_label = QLabel("拖入图片或任意文件开始分析")
+        self.file_label = QLabel("拖入任意文件开始分析")
         bar.addWidget(self.file_label, 1)
+        self.btn_save_as = QPushButton("另存为…")
+        self.btn_save_as.clicked.connect(self._save_as)
+        bar.addWidget(self.btn_save_as)
         layout.addLayout(bar)
 
         splitter = QSplitter(Qt.Vertical)
@@ -98,6 +101,7 @@ class StegoPanel(QWidget):
         top = QSplitter(Qt.Horizontal)
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_overview(), "概览")
+        self.tabs.addTab(self._build_header(), "文件头")
         self.tabs.addTab(self._build_structure(), "结构")
         self.tabs.addTab(self._build_strings(), "字符串")
         top.addWidget(self.tabs)
@@ -113,6 +117,8 @@ class StegoPanel(QWidget):
 
         splitter.addWidget(top)
         self.hex_viewer = HexViewer()
+        self.hex_viewer.dataEdited.connect(self._on_data_edited)
+        self.hex_viewer.saveRequested.connect(self._save)
         splitter.addWidget(self.hex_viewer)
         splitter.setSizes([300, 400])
         layout.addWidget(splitter, 1)
@@ -124,6 +130,19 @@ class StegoPanel(QWidget):
         self.overview.setReadOnly(True)
         self.overview.setPlaceholderText("载入文件后显示类型、哈希与检测结论")
         layout.addWidget(self.overview)
+        return page
+
+    def _build_header(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self.header_table = QTableWidget(0, 2)
+        self.header_table.setHorizontalHeaderLabels(["检查项", "结果"])
+        self.header_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.header_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.header_table.verticalHeader().setVisible(False)
+        self.header_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.header_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        layout.addWidget(self.header_table)
         return page
 
     def _build_structure(self) -> QWidget:
@@ -175,11 +194,15 @@ class StegoPanel(QWidget):
         self._data = data
         self._result = identify(data, os.path.basename(path))
         self.file_label.setText(f"{self._path}  ({len(data):,} 字节)")
+        self._refresh_all()
+
+    def _refresh_all(self) -> None:
         self._refresh_overview()
+        self._refresh_header()
         self._refresh_structure()
         self._refresh_strings()
-        self.entropy_plot.set_blocks(entropy_blocks(data))
-        self.hex_viewer.set_data(data)
+        self.entropy_plot.set_blocks(entropy_blocks(self._data))
+        self.hex_viewer.set_data(self._data)
         self.hex_viewer.goto_offset(0)
 
     # ---------------- 各视图刷新 ----------------
@@ -199,10 +222,17 @@ class StegoPanel(QWidget):
         for name, value in digests(self._data).items():
             lines.append(f"{name:<10}: {value}")
         lines.append(f"整体熵     : {entropy(self._data):.4f} bit/byte  (0~8)")
+
+        info_rows = fileparse.image_info(result.real_name, self._data)
+        if info_rows:
+            lines.append("")
+            lines.append("── 图像信息 ──")
+            lines.extend(f"{key:<10}: {value}" for key, value in info_rows)
+
         if result.trailing:
             t = result.trailing
             lines.append("")
-            lines.append(f"── 尾随数据 ──")
+            lines.append("── 尾随数据 ──")
             lines.append(f"逻辑结束   : {t.offset:,}")
             lines.append(f"附加长度   : {t.length:,} 字节")
             if t.hint:
@@ -216,6 +246,44 @@ class StegoPanel(QWidget):
             lines.append("── 检测结论 ──")
             lines.extend(f"• {note}" for note in result.notes)
         self.overview.setPlainText("\n".join(lines))
+
+    def _refresh_header(self) -> None:
+        result = self._result
+        self.header_table.setRowCount(0)
+        if result is None:
+            return
+        head = self._data[:16]
+        head_ascii = "".join(chr(b) if 32 <= b <= 126 else "." for b in head)
+        rows: list[tuple[str, str]] = [
+            ("实际文件头", f"{' '.join(f'{b:02X}' for b in head)}  |  {head_ascii}"),
+        ]
+        check = result.header
+        if check is not None and check.expected:
+            rows.append(("期望 magic", check.expected_hex))
+            rows.append(("magic 偏移", f"0x{check.offset:X} ({check.offset})"))
+            rows.append(("文件头匹配", "是 ✓" if check.matched else "否 ⚠"))
+        else:
+            rows.append(("期望 magic", "未知(未命中内置签名)"))
+            rows.append(("文件头匹配", "无法判定"))
+        rows.extend([
+            ("真实类型", result.real_name),
+            ("声明扩展名", result.declared_ext or "(无)"),
+            ("建议扩展名", result.real_ext or "(未知)"),
+            ("扩展名匹配", "是" if result.ext_ok else "否 ⚠"),
+        ])
+        if result.matches:
+            rows.append(("全部命中签名", "、".join(result.matches)))
+        if result.trailing:
+            t = result.trailing
+            rows.append(("尾随数据", f"逻辑结束 0x{t.offset:X},附加 {t.length:,} 字节 {t.hint}".strip()))
+        else:
+            rows.append(("尾随数据", "无"))
+        rows.append(("文件大小", f"{result.size:,} 字节"))
+
+        self.header_table.setRowCount(len(rows))
+        for row, (key, value) in enumerate(rows):
+            self.header_table.setItem(row, 0, QTableWidgetItem(key))
+            self.header_table.setItem(row, 1, QTableWidgetItem(value))
 
     def _refresh_structure(self) -> None:
         self.structure.clear()
@@ -261,6 +329,35 @@ class StegoPanel(QWidget):
             item_off.setData(Qt.UserRole, offset)
             self.string_table.setItem(row, 0, item_off)
             self.string_table.setItem(row, 1, QTableWidgetItem(text[:200]))
+
+    # ---------------- 编辑 / 保存 ----------------
+    def _on_data_edited(self) -> None:
+        if not self._path:
+            return
+        self._data = self.hex_viewer.data_bytes
+        self._result = identify(self._data, os.path.basename(self._path))
+        self._refresh_overview()
+        self._refresh_header()
+        self._refresh_structure()
+        self._refresh_strings()
+        self.entropy_plot.set_blocks(entropy_blocks(self._data))
+        self.file_label.setText(f"{self._path}  ({len(self._data):,} 字节)  [已修改]")
+
+    def _save(self) -> None:
+        if not self._path:
+            return
+        if self.hex_viewer.save_to(self._path):
+            self.file_label.setText(f"{self._path}  ({len(self._data):,} 字节)  [已保存]")
+
+    def _save_as(self) -> None:
+        if not self._data:
+            return
+        default = self._path or "output.bin"
+        path, _ = QFileDialog.getSaveFileName(self, "另存为", default)
+        if not path:
+            return
+        if self.hex_viewer.save_to(path):
+            self.file_label.setText(f"{path}  ({len(self._data):,} 字节)")
 
     # ---------------- 联动 ----------------
     def _on_structure_click(self, item: QTreeWidgetItem, _column: int) -> None:

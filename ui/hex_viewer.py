@@ -1,16 +1,18 @@
-"""通用 Hex 查看器组件:虚拟滚动表格 + 跳转/搜索 + 光标处数据解释。"""
+"""通用 Hex 查看器组件:虚拟滚动表格 + 跳转/搜索 + 数据解释 + 双击编辑。"""
 
 from __future__ import annotations
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
+from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QTableView,
     QTableWidget,
@@ -81,9 +83,25 @@ class HexTableModel(QAbstractTableModel):
             return font
         return None
 
+    def replace(self, offset: int, new: bytes) -> bool:
+        """原位替换若干字节(不改变文件长度),返回是否真的发生变化。"""
+        if not new or offset < 0 or offset + len(new) > len(self._data):
+            return False
+        if self._data[offset:offset + len(new)] == new:
+            return False
+        self._data = self._data[:offset] + new + self._data[offset + len(new):]
+        first_row = offset // _BYTES_PER_ROW
+        last_row = (offset + len(new) - 1) // _BYTES_PER_ROW
+        self.dataChanged.emit(self.index(first_row, 1),
+                              self.index(last_row, self.COLS - 1))
+        return True
+
 
 class HexViewer(QWidget):
-    """Hex 查看器:表格 + 偏移跳转 + 搜索 + 数据检查器。"""
+    """Hex 查看器:表格 + 偏移跳转 + 搜索 + 双击编辑 + 撤销/保存。"""
+
+    dataEdited = Signal()
+    saveRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -91,6 +109,9 @@ class HexViewer(QWidget):
         self._matches: list[int] = []
         self._match_pos = -1
         self._jump_offset: int | None = None
+        self._undo: list[tuple[int, bytes, bytes]] = []
+        self._redo: list[tuple[int, bytes, bytes]] = []
+        self._modified = False
         self._build_ui()
 
     # ---------------- UI ----------------
@@ -136,6 +157,18 @@ class HexViewer(QWidget):
         self.btn_copy.clicked.connect(self._copy_selection)
         bar.addWidget(self.btn_copy)
 
+        bar.addSpacing(12)
+        self.btn_undo = QPushButton("撤销")
+        self.btn_undo.clicked.connect(self.undo)
+        bar.addWidget(self.btn_undo)
+        self.btn_redo = QPushButton("重做")
+        self.btn_redo.clicked.connect(self.redo)
+        bar.addWidget(self.btn_redo)
+        self.btn_save = QPushButton("保存")
+        self.btn_save.setToolTip("把修改写回文件(Ctrl+S)")
+        self.btn_save.clicked.connect(self._request_save)
+        bar.addWidget(self.btn_save)
+
         self.match_label = QLabel("")
         bar.addWidget(self.match_label)
         bar.addStretch()
@@ -164,17 +197,34 @@ class HexViewer(QWidget):
         self.inspector.setMaximumHeight(170)
         layout.addWidget(self.inspector)
 
+        QShortcut(QKeySequence.Undo, self, activated=self.undo)
+        QShortcut(QKeySequence.Redo, self, activated=self.redo)
+        QShortcut(QKeySequence.Save, self, activated=self._request_save)
+        self._update_state()
+
     # ---------------- 数据 ----------------
     def set_data(self, data: bytes) -> None:
         self._data = data
         self._matches = []
         self._match_pos = -1
+        self._undo.clear()
+        self._redo.clear()
+        self._modified = False
+        self._update_state()
         self.match_label.setText("")
         self.model.set_data(data)
         self.inspector.setRowCount(0)
 
     def clear(self) -> None:
         self.set_data(b"")
+
+    @property
+    def data_bytes(self) -> bytes:
+        return self._data
+
+    @property
+    def is_modified(self) -> bool:
+        return self._modified
 
     def current_offset(self) -> int:
         index = self.table.currentIndex()
@@ -195,6 +245,70 @@ class HexViewer(QWidget):
             self._jump_offset = None
             self._update_inspector(offset)
 
+    # ---------------- 编辑 ----------------
+    def apply_edit(self, offset: int, new: bytes) -> bool:
+        if offset < 0 or offset + len(new) > len(self._data) or not new:
+            return False
+        old = self._data[offset:offset + len(new)]
+        if not self.model.replace(offset, new):
+            return False
+        self._data = self.model.data_bytes
+        self._undo.append((offset, old, new))
+        self._redo.clear()
+        self._modified = True
+        self._update_state()
+        self._clear_search()
+        self.dataEdited.emit()
+        return True
+
+    def undo(self) -> None:
+        if not self._undo:
+            return
+        offset, old, new = self._undo.pop()
+        if self.model.replace(offset, old):
+            self._data = self.model.data_bytes
+            self._redo.append((offset, old, new))
+            self._modified = True
+            self._update_state()
+            self._clear_search()
+            self.dataEdited.emit()
+
+    def redo(self) -> None:
+        if not self._redo:
+            return
+        offset, old, new = self._redo.pop()
+        if self.model.replace(offset, new):
+            self._data = self.model.data_bytes
+            self._undo.append((offset, old, new))
+            self._modified = True
+            self._update_state()
+            self._clear_search()
+            self.dataEdited.emit()
+
+    def save_to(self, path: str) -> bool:
+        try:
+            with open(path, "wb") as f:
+                f.write(self._data)
+        except OSError as e:
+            QMessageBox.warning(self, "MiscKit", f"保存失败:{e}")
+            return False
+        self._modified = False
+        self._update_state()
+        return True
+
+    def _request_save(self) -> None:
+        self.saveRequested.emit()
+
+    def _update_state(self) -> None:
+        self.btn_undo.setEnabled(bool(self._undo))
+        self.btn_redo.setEnabled(bool(self._redo))
+        self.btn_save.setEnabled(self._modified)
+
+    def _clear_search(self) -> None:
+        self._matches = []
+        self._match_pos = -1
+        self.match_label.setText("")
+
     # ---------------- 交互 ----------------
     def _on_goto(self) -> None:
         text = self.goto_edit.text().strip()
@@ -207,6 +321,34 @@ class HexViewer(QWidget):
             return
         self.goto_offset(value)
 
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        index = self.table.indexAt(event.position().toPoint())
+        if not index.isValid() or not self._data:
+            super().mouseDoubleClickEvent(event)
+            return
+        offset = self._offset_from_pos(index, event.position().toPoint().x())
+        old = self._data[offset]
+        text, ok = QInputDialog.getText(
+            self,
+            "编辑字节",
+            f"偏移 0x{offset:X} 当前值 0x{old:02X} ({old})\n"
+            f"输入新的十六进制值 (00-FF):",
+            text=f"{old:02X}",
+        )
+        if not ok:
+            return
+        try:
+            value = int(text.strip().lower().removeprefix("0x"), 16)
+        except ValueError:
+            QMessageBox.warning(self, "MiscKit", "请输入 00-FF 之间的十六进制值")
+            return
+        if not 0 <= value <= 0xFF:
+            QMessageBox.warning(self, "MiscKit", "字节值必须在 00-FF 之间")
+            return
+        if self.apply_edit(offset, bytes([value])):
+            self.goto_offset(offset)
+            self.match_label.setText(f"已修改 0x{offset:X}: 0x{old:02X} → 0x{value:02X}")
+
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
         if not current.isValid():
             return
@@ -218,18 +360,22 @@ class HexViewer(QWidget):
         self._update_inspector(offset)
 
     def _offset_from_cursor(self, index: QModelIndex) -> int:
-        """根据鼠标在单元格内的水平位置估算具体字节,保证检查器显示的是点中的字节。"""
-        row_start = index.row() * _BYTES_PER_ROW
-        if index.column() != 1:
-            return row_start
-        rect = self.table.visualRect(index)
-        if rect.isNull():
-            return row_start
+        """根据鼠标在单元格内的水平位置估算具体字节。"""
         x = self.table.viewport().mapFromGlobal(QCursor.pos()).x()
+        return self._offset_from_pos(index, x)
+
+    def _offset_from_pos(self, index: QModelIndex, x: int) -> int:
+        row_start = index.row() * _BYTES_PER_ROW
+        if index.column() not in (1, 2):
+            return min(row_start, max(0, len(self._data) - 1))
+        rect = self.table.visualRect(index)
         char_w = QFontMetrics(self.table.font()).horizontalAdvance("0")
-        if char_w <= 0:
+        if rect.isNull() or char_w <= 0:
             return row_start
-        pos = int((x - rect.x()) / (char_w * 3))
+        if index.column() == 1:
+            pos = int((x - rect.x()) / (char_w * 3))
+        else:
+            pos = int((x - rect.x()) / char_w)
         return min(row_start + max(0, min(pos, _BYTES_PER_ROW - 1)),
                    max(0, len(self._data) - 1))
 

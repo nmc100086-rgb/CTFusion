@@ -1,6 +1,6 @@
 # MiscKit — CTF Misc 桌面工具箱
 
-一个基于 **PySide6** 的本地 CTF 杂项题辅助工具。当前版本已完成「编码解码」工作台（**35 种**编解码算法、一键多层链式智能解码）与「文件分析」页签（**类型识别 / 结构解析 / Hex 查看 / 熵图 / 字符串**）；ZIP 破解页签为后续规划。
+一个基于 **PySide6** 的本地 CTF 杂项题辅助工具。当前版本已完成「编码解码」工作台（**35 种**编解码算法、一键多层链式智能解码）、「文件分析」页签（**类型识别 / 文件头检测 / 结构解析 / 可编辑 Hex / 熵图 / 字符串**）、「图片隐写」页签（**预览 / LSB 位平面 / LSB 提取 / PNG CRC 与宽高修复 / EXIF / GIF 帧**）以及「ZIP 破解」页签。
 
 ## 功能特性
 
@@ -13,11 +13,20 @@
 - **拖放分发**：把文件拖进窗口，按类型自动跳到对应页签
 - **文件分析**：
   - magic bytes 识别 40+ 格式，检测扩展名伪造并给出修复建议
+  - **文件头检测**：实际前 16 字节（Hex + ASCII）与期望 magic、匹配状态、magic 偏移
+  - **图片基本信息**：宽高、位深、颜色类型、隔行、帧数、DPI、IDAT 大小、像素总数
   - 结构解析：PNG（chunk + **CRC 校验**）、JPG（段列表）、GIF（帧）、BMP、ZIP（本地头/中央目录 + **伪加密标记**）
   - **尾随数据检测**：文件逻辑结束后附加的隐藏内容（内嵌 ZIP/PNG、ASCII 提示）
-  - Hex 查看器：虚拟滚动（大文件不卡）、偏移跳转、文本/Hex 搜索、选区复制
+  - **可编辑 Hex 查看器**：双击改字节、撤销/重做（Ctrl+Z/Ctrl+Y）、Ctrl+S 写回、另存为；修改后自动重新识别与解析
   - 数据检查器：光标处 uint8/16/32/64、int、float/double（双端序）、时间戳
   - 字符串提取（正则过滤）、熵图、MD5/SHA1/SHA256/CRC32
+- **图片隐写**：
+  - 图片预览（PNG/JPG/GIF/BMP/WEBP 等）
+  - **LSB 位平面可视化**：R/G/B/A × bit 0~7 任意切换
+  - **LSB 数据提取**：按通道与位序号提取隐藏位流，文本/Hex 预览，一键保存
+  - **PNG 修复**：逐个 chunk 校验 CRC、一键重算 CRC、按填写或 IDAT 推算的真实尺寸修复 IHDR 宽高
+  - **EXIF 表格**：制造商、型号、拍摄时间、曝光、焦距、用户注释等
+  - **GIF 逐帧浏览**
 - **双向联动**：结构树 / 字符串双击直接跳到 Hex 对应偏移
 
 ## 目录结构
@@ -27,17 +36,19 @@ MiscKit/
 ├── main.py                      # 程序入口
 ├── requirements.txt
 ├── ui/
-│   ├── main_window.py           # 主窗口：3 页签 + 拖放分发
+│   ├── main_window.py           # 主窗口:4 页签 + 拖放分发
 │   ├── decoder_panel.py         # 编码解码工作台
-│   ├── stego_panel.py           # 文件分析：概览 / 结构 / 字符串 / 熵图
-│   ├── hex_viewer.py            # 通用 Hex 查看器组件（虚拟滚动）
-│   └── zip_panel.py             # ZIP 破解（占位）
+│   ├── file_panel.py            # 文件分析:概览 / 文件头 / 结构 / 字符串 / 熵图
+│   ├── image_panel.py           # 图片隐写:LSB / PNG 修复 / EXIF / GIF 帧
+│   ├── hex_viewer.py            # 通用 Hex 查看器组件(虚拟滚动 + 编辑 + 撤销)
+│   └── zip_panel.py             # ZIP 破解(占位)
 └── core/
-    ├── chain.py                 # 一键智能解码：BFS + 启发式剪枝
-    ├── filetype.py              # magic bytes 识别 + 扩展名伪造 + 尾随数据
-    ├── fileparse.py             # PNG/JPG/GIF/BMP/ZIP 结构解析
+    ├── chain.py                 # 一键智能解码:BFS + 启发式剪枝
+    ├── filetype.py              # magic bytes 识别 + 文件头检测 + 尾随数据
+    ├── fileparse.py             # 结构解析 + PNG 信息/CRC/宽高修复 + EXIF + GIF 帧
     ├── analysis.py              # 哈希 / 熵 / 字符串 / 数据解释
-    ├── lsb.py / zipcrack.py     # 后续模块占位
+    ├── lsb.py                   # LSB 位平面与按位提取
+    ├── zipcrack.py              # 后续模块占位
     └── codecs/
         ├── __init__.py          # 导入实现模块 → 自动注册
         ├── base.py              # CodecBase 统一接口 + 可读性评分
@@ -150,9 +161,10 @@ from core.codecs import my_module  # noqa: F401
 
 ## 已知限制 / 规划
 
-- [x] 「文件分析」页签：类型识别、结构解析（PNG/JPG/GIF/BMP/ZIP）、Hex 查看器、字符串、熵图、尾随数据检测
-- [ ] 图片隐写：EXIF 表格、LSB 位平面可视化
-- [ ] Hex 只读，暂不支持直接编辑保存（可复制选区内容）
+- [x] 「文件分析」页签：类型识别、文件头检测、结构解析（PNG/JPG/GIF/BMP/ZIP）、可编辑 Hex、字符串、熵图、尾随数据检测
+- [x] 图片隐写：LSB 位平面 / 数据提取、PNG CRC 与宽高修复、EXIF 表格、GIF 帧浏览
+- [x] Hex 支持双击改字节、撤销/重做、Ctrl+S 写回与另存为
+- [ ] EXIF 仅解析常用标签；缩略图与 GPS 明细尚未展开
 - [ ] 「ZIP 破解」页签：伪加密修复、CRC32 爆破、字典爆破 — 目前为占位
 - [ ] JSFuck 解码依赖本机 `node` 命令，未安装时给出明确提示
 - [ ] PyInstaller 打包为独立 exe 尚待完成

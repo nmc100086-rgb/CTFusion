@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core import fileparse  # noqa: E402
+from core import fileparse, lsb  # noqa: E402
 from core.analysis import digests, entropy, interpret_at, strings  # noqa: E402
 from core.filetype import identify, identify_file  # noqa: E402
 
@@ -67,6 +67,16 @@ def zip_bytes() -> bytes:
     return buf.getvalue()
 
 
+def exif_jpg_bytes() -> bytes:
+    """构造带一个 EXIF 制造商标签的最小 JPEG。"""
+    tiff = b"II\x2a\x00" + struct.pack("<I", 8)
+    entry = struct.pack("<HHI", 0x010F, 2, 6) + struct.pack("<I", 26)
+    ifd = struct.pack("<H", 1) + entry + struct.pack("<I", 0)
+    payload = b"Exif\x00\x00" + tiff + ifd + b"Canon\x00"
+    return (b"\xff\xd8" + b"\xff\xe1" + struct.pack(">H", len(payload) + 2)
+            + payload + b"\xff\xd9")
+
+
 class FileTypeTests(unittest.TestCase):
     def test_png_identify_ok(self):
         result = identify(png_bytes(), "a.png")
@@ -99,6 +109,17 @@ class FileTypeTests(unittest.TestCase):
         self.assertEqual(identify(b"\x7fELF\x02\x01", "a.elf").real_name, "ELF")
         self.assertEqual(identify(b"7z\xbc\xaf\x27\x1cxx", "a.7z").real_name, "7Z")
         self.assertEqual(identify(b"RAR!\x1a\x07\x00xx", "a.rar").real_name, "RAR")
+
+    def test_header_check(self):
+        result = identify(png_bytes(), "a.png")
+        self.assertIsNotNone(result.header)
+        self.assertTrue(result.header.matched)
+        self.assertEqual(result.header.offset, 0)
+        self.assertEqual(result.header.name, "PNG")
+        self.assertEqual(result.header.expected_hex, "89 50 4E 47 0D 0A 1A 0A")
+        unknown = identify(b"\x01\x02\x03\x04", "a.bin")
+        self.assertFalse(unknown.header.matched)
+        self.assertEqual(unknown.header.expected, b"")
 
 
 class FileParseTests(unittest.TestCase):
@@ -140,6 +161,50 @@ class FileParseTests(unittest.TestCase):
         self.assertEqual(end, len(zip_bytes()))
 
 
+class ImageAnalysisTests(unittest.TestCase):
+    def test_png_info_and_crc_repair(self):
+        data = png_bytes(bad_crc=True)
+        info = fileparse.png_info(data)
+        self.assertIsNotNone(info)
+        self.assertEqual((info.width, info.height), (1, 1))
+        self.assertEqual(info.color_type, 2)
+        self.assertEqual(len(info.crc_errors), 1)
+        fixed = fileparse.repair_png_crc(data)
+        self.assertEqual(fileparse.png_info(fixed).crc_errors, [])
+        self.assertTrue(fixed.endswith(png_bytes()[-12:]))
+
+    def test_png_dimension_repair(self):
+        fixed = fileparse.repair_png_dimensions(png_bytes(), 5, 7)
+        info = fileparse.png_info(fixed)
+        self.assertEqual((info.width, info.height), (5, 7))
+        self.assertEqual(info.crc_errors, [])
+
+    def test_png_actual_size(self):
+        self.assertEqual(fileparse.png_actual_size(png_bytes()), (1, 1))
+
+    def test_image_info(self):
+        rows = dict(fileparse.image_info("PNG", png_bytes()))
+        self.assertEqual(rows["尺寸"], "1 x 1")
+        self.assertEqual(rows["CRC 校验"], "全部通过")
+        gif_rows = dict(fileparse.image_info("GIF", gif_bytes()))
+        self.assertEqual(gif_rows["帧数"], "0")
+
+    def test_exif(self):
+        rows = dict(fileparse.parse_exif(exif_jpg_bytes()))
+        self.assertEqual(rows.get("制造商"), "Canon")
+        self.assertEqual(fileparse.parse_exif(png_bytes()), [])
+
+    def test_gif_frame_offsets(self):
+        self.assertEqual(fileparse.gif_frame_offsets(gif_bytes()), [])
+
+    def test_lsb_bit_plane_and_extract(self):
+        on = bytes([1, 0, 0, 255])
+        off = bytes([0, 0, 0, 255])
+        pixels = on * 4 + off * 4
+        self.assertEqual(list(lsb.bit_plane(pixels, 4, 0, 0)), [255, 255, 255, 255, 0, 0, 0, 0])
+        self.assertEqual(lsb.extract_bytes(pixels, 4, 0, 0), b"\xF0")
+
+
 class AnalysisTests(unittest.TestCase):
     def test_entropy_bounds(self):
         self.assertAlmostEqual(entropy(b"\x00" * 100), 0.0, places=6)
@@ -163,6 +228,8 @@ class AnalysisTests(unittest.TestCase):
 
 
 try:
+    from PySide6.QtCore import QBuffer, QIODevice, Qt
+    from PySide6.QtGui import QImage
     from PySide6.QtWidgets import QApplication
 
     from ui.main_window import MainWindow
@@ -172,7 +239,7 @@ except ImportError:  # pragma: no cover
 
 
 @unittest.skipUnless(QApplication is not None, "需要安装 PySide6")
-class StegoPanelSmokeTests(unittest.TestCase):
+class FilePanelSmokeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -180,7 +247,7 @@ class StegoPanelSmokeTests(unittest.TestCase):
     def test_load_png_shows_structure_and_trailing(self):
         window = MainWindow()
         try:
-            panel = window.stego_panel
+            panel = window.file_panel
             data = png_bytes(trailing=b"PK\x03\x04hidden")
             with tempfile.TemporaryDirectory() as tmp:
                 path = os.path.join(tmp, "test.png")
@@ -191,8 +258,16 @@ class StegoPanelSmokeTests(unittest.TestCase):
             self.assertEqual(len(panel.hex_viewer.model.data_bytes), len(data))
             self.assertIn("尾随数据", panel.overview.toPlainText())
             self.assertIn("CRC", panel.overview.toPlainText())
+            self.assertIn("图像信息", panel.overview.toPlainText())
             self.assertGreaterEqual(panel.structure.topLevelItemCount(), 3)
             self.assertGreater(panel.string_table.rowCount(), 0)
+
+            header = dict(
+                (panel.header_table.item(r, 0).text(), panel.header_table.item(r, 1).text())
+                for r in range(panel.header_table.rowCount())
+            )
+            self.assertEqual(header["期望 magic"], "89 50 4E 47 0D 0A 1A 0A")
+            self.assertIn("ZIP", header["尾随数据"])
 
             panel.hex_viewer.goto_offset(len(data) - 1)
             self.assertTrue(panel.hex_viewer.inspector.rowCount() > 0)
@@ -202,13 +277,90 @@ class StegoPanelSmokeTests(unittest.TestCase):
     def test_load_unknown_format(self):
         window = MainWindow()
         try:
-            panel = window.stego_panel
+            panel = window.file_panel
             with tempfile.TemporaryDirectory() as tmp:
                 path = os.path.join(tmp, "x.dat")
                 with open(path, "wb") as f:
                     f.write(b"\x00\x01\x02\x03" * 10)
                 panel.load_file(path)
             self.assertIn("暂未支持结构解析", panel.structure.topLevelItem(0).text(0))
+        finally:
+            window.close()
+
+    def test_hex_edit_undo_redo_save(self):
+        window = MainWindow()
+        try:
+            panel = window.file_panel
+            data = png_bytes()
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "edit.png")
+                with open(path, "wb") as f:
+                    f.write(data)
+                panel.load_file(path)
+                viewer = panel.hex_viewer
+                self.assertFalse(viewer.is_modified)
+                self.assertTrue(viewer.apply_edit(0, b"\x90"))
+                self.assertEqual(viewer.model.data_bytes[:1], b"\x90")
+                self.assertTrue(viewer.is_modified)
+                self.assertIn("已修改", panel.file_label.text())
+                viewer.undo()
+                self.assertEqual(viewer.model.data_bytes, data)
+                viewer.redo()
+                self.assertEqual(viewer.model.data_bytes[:1], b"\x90")
+                saved = os.path.join(tmp, "saved.png")
+                self.assertTrue(viewer.save_to(saved))
+                with open(saved, "rb") as f:
+                    self.assertEqual(f.read()[:1], b"\x90")
+                self.assertFalse(viewer.is_modified)
+        finally:
+            window.close()
+
+
+@unittest.skipUnless(QApplication is not None, "需要安装 PySide6")
+class ImagePanelSmokeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _png_bytes(self) -> bytes:
+        image = QImage(4, 4, QImage.Format_RGB32)
+        image.fill(Qt.black)
+        buffer = QBuffer()
+        buffer.open(QIODevice.WriteOnly)
+        image.save(buffer, "PNG")
+        return bytes(buffer.data())
+
+    def test_load_png_and_lsb(self):
+        window = MainWindow()
+        try:
+            panel = window.image_panel
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "img.png")
+                with open(path, "wb") as f:
+                    f.write(self._png_bytes())
+                panel.load_file(path)
+            self.assertEqual(panel._kind, "PNG")
+            self.assertGreaterEqual(panel.info_table.rowCount(), 5)
+            self.assertEqual(panel.crc_table.rowCount(), 0)
+            self.assertIn("2 字节", panel.lsb_capacity.text())
+            panel._on_bitplane()
+            self.assertFalse(panel.lsb_preview.pixmap().isNull())
+            panel._on_extract()
+            self.assertIn("通道 R", panel.lsb_output.toPlainText())
+        finally:
+            window.close()
+
+    def test_png_crc_error_listed(self):
+        window = MainWindow()
+        try:
+            panel = window.image_panel
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "bad.png")
+                with open(path, "wb") as f:
+                    f.write(png_bytes(bad_crc=True))
+                panel.load_file(path)
+            self.assertEqual(panel.crc_table.rowCount(), 1)
+            self.assertIn("CRC 错误", panel.repair_log.toPlainText())
         finally:
             window.close()
 
