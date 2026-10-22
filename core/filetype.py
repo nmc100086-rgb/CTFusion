@@ -17,6 +17,14 @@ class Signature:
     extra: tuple[int, bytes] | None = None  # 额外校验:(偏移, 必须匹配的字节)
 
 
+@dataclass(frozen=True)
+class Hit:
+    """一次实际命中:签名 + magic 在文件中的真实偏移。"""
+
+    signature: Signature
+    offset: int
+
+
 _SIGNATURES: tuple[Signature, ...] = (
     Signature("PNG", (".png",), b"\x89PNG\r\n\x1a\n"),
     Signature("JPEG", (".jpg", ".jpeg", ".jpe"), b"\xff\xd8\xff"),
@@ -69,6 +77,16 @@ _PARSE_KIND = {
     "PNG": "PNG", "JPEG": "JPEG", "GIF": "GIF", "BMP": "BMP", "ZIP": "ZIP",
 }
 
+# 允许在文件头前部扫描的“强签名”。弱签名(BM/MZ 等)不参与扫描,
+# 否则普通文本里的两个字母就会造成误报。
+_PREFIX_SCAN_NAMES = {
+    "PNG", "JPEG", "GIF", "ZIP", "RAR", "7Z", "GZIP", "BZIP2", "XZ",
+    "PDF", "ELF", "SQLite", "FLAC", "OGG", "MIDI", "MKV", "PCAP",
+    "PCAPNG", "Java Class", "WASM", "OLE 复合文档", "WEBP", "WAV", "AVI",
+}
+
+_PREFIX_SCAN_LIMIT = 4096
+
 
 @dataclass
 class TrailingData:
@@ -108,67 +126,259 @@ class IdentifyResult:
     trailing: TrailingData | None = None
     header: HeaderCheck | None = None
     notes: list[str] = field(default_factory=list)
+    prefix: int = 0
+    text_encoding: str = ""
 
     @property
     def kind(self) -> str:
         return self.real_name
 
 
-def _match(data: bytes) -> list[Signature]:
-    hits: list[Signature] = []
+def _u16le(data: bytes, pos: int) -> int:
+    return int.from_bytes(data[pos:pos + 2], "little")
+
+
+def _u32le(data: bytes, pos: int) -> int:
+    return int.from_bytes(data[pos:pos + 4], "little")
+
+
+def _valid_bmp(data: bytes, off: int) -> bool:
+    """BM 只有两字节,必须继续检查 DIB 头,避免把 "BMW..." 当位图。"""
+    if off + 26 > len(data):
+        return False
+    declared_size = _u32le(data, off + 2)
+    pixel_off = _u32le(data, off + 10)
+    dib_size = _u32le(data, off + 14)
+    if dib_size < 12 or dib_size > 4096:
+        return False
+    if dib_size != 12 and off + 30 > len(data):
+        return False
+    if pixel_off < 14 or pixel_off > max(len(data), declared_size):
+        return False
+    if declared_size and declared_size < pixel_off:
+        return False
+    if dib_size == 12:  # OS/2 BITMAPCOREHEADER:宽高是 16 位
+        width = _u16le(data, off + 18)
+        height = _u16le(data, off + 20)
+        bpp = _u16le(data, off + 24)
+    else:
+        width = int.from_bytes(data[off + 18:off + 22], "little", signed=True)
+        height = int.from_bytes(data[off + 22:off + 26], "little", signed=True)
+        bpp = _u16le(data, off + 28)
+    if width <= 0 or height == 0:
+        return False
+    if bpp not in (1, 2, 4, 8, 16, 24, 32, 64):
+        return False
+    return True
+
+
+def _valid_pe(data: bytes, off: int) -> bool:
+    """MZ 同样太弱,要求 e_lfanew 指向 PE\0\0。"""
+    if off + 0x40 > len(data):
+        return False
+    lfanew = _u32le(data, off + 0x3C)
+    if lfanew < 0x40 or off + lfanew + 4 > len(data):
+        return False
+    return data[off + lfanew:off + lfanew + 4] == b"PE\x00\x00"
+
+
+def _valid_mp4(data: bytes, off: int) -> bool:
+    """off 指向 ftyp,box size 在它前面 4 字节。"""
+    box = off - 4
+    if box < 0 or off + 8 > len(data):
+        return False
+    size = int.from_bytes(data[box:box + 4], "big")
+    if size != 0 and (size < 8 or size > len(data) - box):
+        return False
+    brand = data[off + 4:off + 8]
+    return all(32 <= b <= 126 for b in brand)
+
+
+def _valid_tar(data: bytes, off: int) -> bool:
+    """校验 tar header 的 checksum,避免任意位置出现 ustar 就误报。"""
+    base = off - 257
+    if base < 0 or base + 512 > len(data):
+        return False
+    header = data[base:base + 512]
+    stored = header[148:156].strip(b"\x00 ")
+    try:
+        expected = int(stored, 8)
+    except ValueError:
+        return False
+    actual = sum(header[:148]) + 8 * 32 + sum(header[156:])
+    return stored not in (b"", b"0") and expected == actual
+
+
+def _valid_hit(sig: Signature, data: bytes, off: int) -> bool:
+    if sig.name == "BMP":
+        return _valid_bmp(data, off)
+    if sig.name == "PE":
+        return _valid_pe(data, off)
+    if sig.name == "MP4":
+        return _valid_mp4(data, off)
+    if sig.name == "TAR":
+        return _valid_tar(data, off)
+    return True
+
+
+def _hit_at(data: bytes, sig: Signature, off: int) -> Hit | None:
+    if off < 0 or off + len(sig.magic) > len(data):
+        return None
+    if data[off:off + len(sig.magic)] != sig.magic:
+        return None
+    if sig.extra is not None:
+        extra_off, need = sig.extra
+        pos = off + extra_off
+        if data[pos:pos + len(need)] != need:
+            return None
+    if not _valid_hit(sig, data, off):
+        return None
+    return Hit(sig, off)
+
+
+def _match(data: bytes) -> list[Hit]:
+    hits: list[Hit] = []
     for sig in _SIGNATURES:
-        if sig.offset + len(sig.magic) > len(data):
-            continue
-        if data[sig.offset:sig.offset + len(sig.magic)] != sig.magic:
-            continue
-        if sig.extra is not None:
-            off, need = sig.extra
-            if data[off:off + len(need)] != need:
-                continue
-        hits.append(sig)
+        hit = _hit_at(data, sig, sig.offset)
+        if hit is not None:
+            hits.append(hit)
     return hits
 
 
-def _is_text(data: bytes) -> bool:
+def _prefix_match(data: bytes) -> list[Hit]:
+    """在文件头前 4KB 内寻找强签名,用于识别被前置垃圾数据包裹的文件。"""
+    hits: list[Hit] = []
+    seen: set[str] = set()
+    limit = min(len(data), _PREFIX_SCAN_LIMIT)
+    for sig in _SIGNATURES:
+        if sig.offset != 0 or sig.name not in _PREFIX_SCAN_NAMES or sig.name in seen:
+            continue
+        start = 1
+        while start < limit:
+            off = data.find(sig.magic, start, limit)
+            if off < 0:
+                break
+            hit = _hit_at(data, sig, off)
+            if hit is not None:
+                hits.append(hit)
+                seen.add(sig.name)
+                break
+            start = off + 1
+    hits.sort(key=lambda hit: hit.offset)
+    return hits
+
+
+def _text_encoding(data: bytes) -> tuple[bool, str]:
+    """识别常见文本编码,支持中文 UTF-8 / UTF-16 / GB18030。"""
     if not data:
-        return False
+        return False, ""
     sample = data[:4096]
-    printable = sum(1 for b in sample if 32 <= b <= 126 or b in (9, 10, 13))
-    return printable / len(sample) >= 0.9
+    candidates: list[tuple[str, bytes]] = []
+    if sample.startswith(b"\xef\xbb\xbf"):
+        candidates.append(("UTF-8 BOM", sample))
+    elif sample.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        candidates.append(("UTF-32", sample))
+    elif sample.startswith((b"\xff\xfe", b"\xfe\xff")):
+        candidates.append(("UTF-16", sample))
+    # 无 BOM 时用零字节位置判断 UTF-16 端序:BE 的零字节在偶数位,LE 在奇数位。
+    even_zeros = sample[0::2].count(0)
+    odd_zeros = sample[1::2].count(0)
+    utf16_order = ["UTF-16 LE", "UTF-16 BE"]
+    if even_zeros > odd_zeros * 2 and even_zeros >= max(1, len(sample) // 8):
+        utf16_order = ["UTF-16 BE", "UTF-16 LE"]
+    elif odd_zeros > even_zeros * 2 and odd_zeros >= max(1, len(sample) // 8):
+        utf16_order = ["UTF-16 LE", "UTF-16 BE"]
+    candidates.extend([
+        ("UTF-8", sample),
+        ("GB18030", sample),
+        (utf16_order[0], sample),
+        (utf16_order[1], sample),
+    ])
+    for name, raw in candidates:
+        try:
+            if name == "UTF-8 BOM":
+                text = raw.decode("utf-8-sig")
+            elif name == "UTF-32":
+                text = raw.decode("utf-32")
+            elif name == "UTF-16":
+                text = raw.decode("utf-16")
+            elif name == "UTF-16 LE":
+                if len(raw) % 2:
+                    raw = raw[:-1]
+                text = raw.decode("utf-16-le")
+            elif name == "UTF-16 BE":
+                if len(raw) % 2:
+                    raw = raw[:-1]
+                text = raw.decode("utf-16-be")
+            elif name == "GB18030":
+                if not any(b >= 0x80 for b in raw):
+                    continue
+                text = raw.decode("gb18030")
+            else:
+                text = raw.decode("utf-8")
+        except (UnicodeDecodeError, LookupError):
+            continue
+        if not text:
+            continue
+        if name in ("UTF-16 LE", "UTF-16 BE"):
+            zero_ratio = sum(1 for b in sample if b == 0) / max(1, len(sample))
+            cjk_ratio = sum("\u4e00" <= ch <= "\u9fff" for ch in text) / len(text)
+            if zero_ratio < 0.15 and cjk_ratio < 0.5:
+                continue
+        if any(0xD800 <= ord(ch) <= 0xDFFF for ch in text):
+            continue
+        printable = sum(1 for ch in text if ch.isprintable() or ch in "\r\n\t")
+        if printable / len(text) >= 0.92 and "\x00" not in text:
+            return True, name
+    return False, ""
+
+
+def _is_text(data: bytes) -> bool:
+    return _text_encoding(data)[0]
 
 
 def identify(data: bytes, filename: str = "") -> IdentifyResult:
     """识别真实文件类型,并与扩展名比对。"""
     ext = os.path.splitext(filename)[1].lower() if filename else ""
+    normal_hits = _match(data)
+    hits = normal_hits or _prefix_match(data)
     hit_names: list[str] = []
-    hits = _match(data)
-    for sig in hits:
-        if sig.name not in hit_names:
-            hit_names.append(sig.name)
+    for hit in hits:
+        if hit.signature.name not in hit_names:
+            hit_names.append(hit.signature.name)
 
     result = IdentifyResult(filename=filename, size=len(data), declared_ext=ext,
                             matches=hit_names)
 
     if hits:
         primary = hits[0]
-        result.real_name = primary.name
-        result.real_ext = primary.exts[0] if primary.exts else ""
+        result.real_name = primary.signature.name
+        result.real_ext = primary.signature.exts[0] if primary.signature.exts else ""
+        result.prefix = primary.offset
         # 扩展名是否合法(允许无扩展名)
         allowed = set()
-        for sig in hits:
-            allowed.update(sig.exts)
+        for hit in hits:
+            allowed.update(hit.signature.exts)
         result.ext_ok = (not ext) or (ext in allowed)
         if ext and not result.ext_ok:
             result.notes.append(
-                f"扩展名 {ext} 与真实类型 {primary.name} 不符,可能是伪造扩展名;"
+                f"扩展名 {ext} 与真实类型 {primary.signature.name} 不符,可能是伪造扩展名;"
                 f"建议改为 {result.real_ext}"
+            )
+        if primary.offset > 0:
+            result.notes.append(
+                f"真实 {primary.signature.name} 文件头位于 offset {primary.offset},"
+                f"前面有 {primary.offset} 字节前置数据"
             )
     elif _is_text(data):
         result.real_name = "纯文本"
         result.real_ext = ".txt"
+        result.text_encoding = _text_encoding(data)[1]
         result.ext_ok = ext in ("", ".txt", ".md", ".csv", ".json", ".xml", ".html")
         if not result.ext_ok:
             result.notes.append(f"扩展名 {ext} 但内容是纯文本,可能是改了扩展名的文本文件")
+        if result.text_encoding not in ("", "UTF-8"):
+            result.notes.append(f"文本编码推测:{result.text_encoding}")
     else:
         result.real_name = "未知二进制"
         result.real_ext = ""
@@ -181,24 +391,27 @@ def identify(data: bytes, filename: str = "") -> IdentifyResult:
     if hits:
         primary = hits[0]
         result.header = HeaderCheck(
-            primary.offset, primary.magic,
-            data[primary.offset:primary.offset + len(primary.magic)],
-            True, primary.name,
+            primary.offset, primary.signature.magic,
+            data[primary.offset:primary.offset + len(primary.signature.magic)],
+            True, primary.signature.name,
         )
     else:
         result.header = HeaderCheck(0, b"", data[:16], False, result.real_name)
 
-    # 尾随数据检测
+    # 尾随数据检测(前置数据需要从真实 magic 位置开始解析)
     kind = _PARSE_KIND.get(result.real_name)
     if kind:
-        end = fileparse.logical_end(kind, data)
-        if end is not None and end < len(data):
-            tail = data[end:]
-            hint = _tail_hint(tail)
-            result.trailing = TrailingData(end, len(data) - end, hint)
-            result.notes.append(f"文件逻辑结束于 {end},尾部有 {len(data) - end} 字节附加数据{hint}")
-            if result.real_name == "ZIP":
-                result.notes.append("ZIP 尾部附加数据:可能是压缩包注释或隐藏文件")
+        payload = data[result.prefix:]
+        end = fileparse.logical_end(kind, payload)
+        if end is not None:
+            end += result.prefix
+            if end < len(data):
+                tail = data[end:]
+                hint = _tail_hint(tail)
+                result.trailing = TrailingData(end, len(data) - end, hint)
+                result.notes.append(f"文件逻辑结束于 {end},尾部有 {len(data) - end} 字节附加数据{hint}")
+                if result.real_name == "ZIP":
+                    result.notes.append("ZIP 尾部附加数据:可能是压缩包注释或隐藏文件")
     return result
 
 

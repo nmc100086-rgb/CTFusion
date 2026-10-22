@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QKeySequence, QShortcut
+from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QRect, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QCursor,
+    QFont,
+    QFontMetrics,
+    QKeySequence,
+    QPalette,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -14,6 +22,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableView,
     QTableWidget,
     QTableWidgetItem,
@@ -22,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.analysis import interpret_at
+from ui.highlight import has_flag
 
 _BYTES_PER_ROW = 16
 
@@ -34,11 +46,44 @@ class HexTableModel(QAbstractTableModel):
     def __init__(self, data: bytes = b"") -> None:
         super().__init__()
         self._data = data
+        self._highlight_rows: set[int] = set()
+        self._highlight_bytes: set[int] = set()
 
     def set_data(self, data: bytes) -> None:
         self.beginResetModel()
         self._data = data
+        self._highlight_rows.clear()
+        self._highlight_bytes.clear()
         self.endResetModel()
+
+    def set_search_matches(self, offsets: list[int], length: int) -> None:
+        rows: set[int] = set()
+        bytes_set: set[int] = set()
+        for offset in offsets:
+            first_row = offset // _BYTES_PER_ROW
+            last_row = (offset + max(1, length) - 1) // _BYTES_PER_ROW
+            rows.update(range(first_row, last_row + 1))
+            bytes_set.update(range(offset, offset + max(1, length)))
+        self._highlight_rows = rows
+        self._highlight_bytes = bytes_set
+        if self._data:
+            self.dataChanged.emit(self.index(0, 0),
+                                  self.index(self.rowCount() - 1, self.COLS - 1))
+
+    def clear_highlights(self) -> None:
+        if not self._highlight_rows and not self._highlight_bytes:
+            return
+        self._highlight_rows.clear()
+        self._highlight_bytes.clear()
+        if self._data:
+            self.dataChanged.emit(self.index(0, 0),
+                                  self.index(self.rowCount() - 1, self.COLS - 1))
+
+    def match_bytes_for_row(self, row: int) -> set[int]:
+        """返回该行内的字节位置(0~15),不是全局 offset。"""
+        start = row * _BYTES_PER_ROW
+        return {i - start for i in range(start, start + _BYTES_PER_ROW)
+                if i in self._highlight_bytes}
 
     @property
     def data_bytes(self) -> bytes:
@@ -75,6 +120,9 @@ class HexTableModel(QAbstractTableModel):
             if index.column() == 1:
                 return " ".join(f"{b:02X}" for b in chunk)
             return "".join(chr(b) if 32 <= b <= 126 else "." for b in chunk)
+        if role == Qt.BackgroundRole and index.column() == 2 and has_flag(
+                "".join(chr(b) if 32 <= b <= 126 else "." for b in chunk)):
+            return QColor("#6f5200")
         if role == Qt.ForegroundRole and index.column() == 0:
             return QColor("#7a7a7a")
         if role == Qt.FontRole:
@@ -97,21 +145,76 @@ class HexTableModel(QAbstractTableModel):
         return True
 
 
+class HexDelegate(QStyledItemDelegate):
+    """在十六进制/ASCII 单元格里精确涂亮命中的字节。"""
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802
+        model = index.model()
+        if (index.column() not in (1, 2)
+                or not isinstance(model, HexTableModel)
+                or not model._highlight_bytes):
+            super().paint(painter, option, index)
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        style = opt.widget.style() if opt.widget is not None else None
+        if style is not None:
+            style.drawPrimitive(QStyle.PE_PanelItemViewItem, opt, painter, opt.widget)
+        text = index.data(Qt.DisplayRole) or ""
+        row = index.row()
+        matched = model.match_bytes_for_row(row)
+        if not matched:
+            painter.save()
+            painter.setPen(opt.palette.color(QPalette.Text))
+            painter.drawText(opt.rect.adjusted(4, 0, -4, 0),
+                             Qt.AlignVCenter, text)
+            painter.restore()
+            return
+        font = opt.font
+        metrics = QFontMetrics(font)
+        painter.save()
+        painter.setFont(font)
+        x0 = opt.rect.left() + 4
+        y0 = opt.rect.top()
+        height = opt.rect.height()
+        # 命中字节的背景
+        if index.column() == 1:
+            for pos in matched:
+                start = pos * 3
+                x = x0 + metrics.horizontalAdvance(text[:start])
+                width = metrics.horizontalAdvance(text[start:start + 2])
+                painter.fillRect(QRect(x, y0, width, height), QColor("#8a6a00"))
+        else:
+            for pos in matched:
+                if pos >= len(text):
+                    continue
+                x = x0 + metrics.horizontalAdvance(text[:pos])
+                width = metrics.horizontalAdvance(text[pos])
+                painter.fillRect(QRect(x, y0, width, height), QColor("#8a6a00"))
+        painter.setPen(opt.palette.color(QPalette.Text))
+        painter.drawText(opt.rect.adjusted(4, 0, -4, 0), Qt.AlignVCenter, text)
+        painter.restore()
+
+
 class HexViewer(QWidget):
     """Hex 查看器:表格 + 偏移跳转 + 搜索 + 双击编辑 + 撤销/保存。"""
 
     dataEdited = Signal()
     saveRequested = Signal()
+    saveAsRequested = Signal()
+    editBlocked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._data = b""
         self._matches: list[int] = []
         self._match_pos = -1
+        self._search_key: tuple[str, str, int] | None = None
         self._jump_offset: int | None = None
         self._undo: list[tuple[int, bytes, bytes]] = []
         self._redo: list[tuple[int, bytes, bytes]] = []
         self._modified = False
+        self._read_only = False
         self._build_ui()
 
     # ---------------- UI ----------------
@@ -134,12 +237,15 @@ class HexViewer(QWidget):
         bar.addSpacing(12)
         bar.addWidget(QLabel("搜索:"))
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("文本,或勾选按 Hex 解析")
+        self.search_edit.setPlaceholderText("ASCII 文本(忽略大小写)")
         self.search_edit.returnPressed.connect(self._on_search)
         bar.addWidget(self.search_edit)
 
-        self.hex_mode = QCheckBox("Hex")
-        bar.addWidget(self.hex_mode)
+        self.search_mode = QComboBox()
+        self.search_mode.addItem("ASCII", "ascii")
+        self.search_mode.addItem("Hex", "hex")
+        self.search_mode.currentIndexChanged.connect(self._on_search_mode_changed)
+        bar.addWidget(self.search_mode)
 
         self.btn_search = QPushButton("查找全部")
         self.btn_search.clicked.connect(self._on_search)
@@ -164,10 +270,14 @@ class HexViewer(QWidget):
         self.btn_redo = QPushButton("重做")
         self.btn_redo.clicked.connect(self.redo)
         bar.addWidget(self.btn_redo)
-        self.btn_save = QPushButton("保存")
-        self.btn_save.setToolTip("把修改写回文件(Ctrl+S)")
+        self.btn_save = QPushButton("覆盖保存")
+        self.btn_save.setToolTip("把修改写回源文件(Ctrl+S)")
         self.btn_save.clicked.connect(self._request_save)
         bar.addWidget(self.btn_save)
+        self.btn_save_as = QPushButton("保存副本…")
+        self.btn_save_as.setToolTip("保存为新文件,不覆盖源文件")
+        self.btn_save_as.clicked.connect(lambda: self.saveAsRequested.emit())
+        bar.addWidget(self.btn_save_as)
 
         self.match_label = QLabel("")
         bar.addWidget(self.match_label)
@@ -177,7 +287,9 @@ class HexViewer(QWidget):
         self.model = HexTableModel()
         self.table = QTableView()
         self.table.setModel(self.model)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setItemDelegate(HexDelegate(self.table))
+        # 搜索时需要只选中命中的单元格,不能用整行选中盖住精确高亮。
+        self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setWordWrap(False)
@@ -187,6 +299,8 @@ class HexViewer(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.setFont(QFont("Consolas"))
         self.table.selectionModel().currentChanged.connect(self._on_current_changed)
+        # QTableView 会吃掉双击事件,在 viewport 上装事件过滤器才能拿到精确坐标。
+        self.table.viewport().installEventFilter(self)
         layout.addWidget(self.table, 1)
 
         self.inspector = QTableWidget(0, 2)
@@ -203,13 +317,17 @@ class HexViewer(QWidget):
         self._update_state()
 
     # ---------------- 数据 ----------------
-    def set_data(self, data: bytes) -> None:
+    def set_data(self, data: bytes, read_only: bool = False) -> None:
         self._data = data
+        self._read_only = read_only
         self._matches = []
         self._match_pos = -1
+        self._search_key = None
         self._undo.clear()
         self._redo.clear()
         self._modified = False
+        self.table.setToolTip(
+            "只读文件:双击修改会被拒绝,可使用「保存副本…」" if read_only else "")
         self._update_state()
         self.match_label.setText("")
         self.model.set_data(data)
@@ -247,6 +365,9 @@ class HexViewer(QWidget):
 
     # ---------------- 编辑 ----------------
     def apply_edit(self, offset: int, new: bytes) -> bool:
+        if self._read_only:
+            self.editBlocked.emit()
+            return False
         if offset < 0 or offset + len(new) > len(self._data) or not new:
             return False
         old = self._data[offset:offset + len(new)]
@@ -262,6 +383,9 @@ class HexViewer(QWidget):
         return True
 
     def undo(self) -> None:
+        if self._read_only:
+            self.editBlocked.emit()
+            return
         if not self._undo:
             return
         offset, old, new = self._undo.pop()
@@ -274,6 +398,9 @@ class HexViewer(QWidget):
             self.dataEdited.emit()
 
     def redo(self) -> None:
+        if self._read_only:
+            self.editBlocked.emit()
+            return
         if not self._redo:
             return
         offset, old, new = self._redo.pop()
@@ -297,16 +424,21 @@ class HexViewer(QWidget):
         return True
 
     def _request_save(self) -> None:
+        if self._read_only:
+            self.saveAsRequested.emit()
+            return
         self.saveRequested.emit()
 
     def _update_state(self) -> None:
-        self.btn_undo.setEnabled(bool(self._undo))
-        self.btn_redo.setEnabled(bool(self._redo))
-        self.btn_save.setEnabled(self._modified)
+        self.btn_undo.setEnabled(bool(self._undo) and not self._read_only)
+        self.btn_redo.setEnabled(bool(self._redo) and not self._read_only)
+        self.btn_save.setEnabled(self._modified and not self._read_only)
 
     def _clear_search(self) -> None:
         self._matches = []
         self._match_pos = -1
+        self._search_key = None
+        self.model.clear_highlights()
         self.match_label.setText("")
 
     # ---------------- 交互 ----------------
@@ -321,12 +453,27 @@ class HexViewer(QWidget):
             return
         self.goto_offset(value)
 
-    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
-        index = self.table.indexAt(event.position().toPoint())
-        if not index.isValid() or not self._data:
-            super().mouseDoubleClickEvent(event)
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if (watched is self.table.viewport()
+                and event.type() == QEvent.MouseButtonDblClick
+                and event.button() == Qt.LeftButton and self._data):
+            pos = event.position().toPoint()
+            index = self.table.indexAt(pos)
+            if index.isValid():
+                self._edit_byte(self._offset_from_pos(index, pos.x()))
+                return True
+        return super().eventFilter(watched, event)
+
+    def _edit_byte(self, offset: int) -> None:
+        if not self._data:
             return
-        offset = self._offset_from_pos(index, event.position().toPoint().x())
+        offset = max(0, min(offset, len(self._data) - 1))
+        if self._read_only:
+            QMessageBox.warning(
+                self, "MiscKit",
+                "当前文件是只读的,不能直接修改。\n"
+                "可以双击前先复制一份,或使用「保存副本…」保存修改后的副本。")
+            return
         old = self._data[offset]
         text, ok = QInputDialog.getText(
             self,
@@ -386,43 +533,82 @@ class HexViewer(QWidget):
             self.inspector.setItem(i, 0, QTableWidgetItem(name))
             self.inspector.setItem(i, 1, QTableWidgetItem(value))
 
-    def _on_search(self) -> None:
+    def _on_search_mode_changed(self, _index: int = -1) -> None:
+        mode = self.search_mode.currentData()
+        self.search_edit.setPlaceholderText(
+            "Hex 字节,如 FF D8 FF" if mode == "hex"
+            else "ASCII 文本(忽略大小写)")
+        self._clear_search()
+
+    def _run_search(self, step: bool) -> bool:
         needle = self.search_edit.text()
+        mode = self.search_mode.currentData() or "ascii"
         if not needle:
-            return
-        if self.hex_mode.isChecked():
+            self._clear_search()
+            self.match_label.setText("请输入搜索内容")
+            return False
+        if mode == "hex":
             try:
                 pattern = bytes.fromhex(needle)
             except ValueError:
-                self.match_label.setText("Hex 格式错误")
-                return
+                self.match_label.setText("Hex 格式错误,示例:FF D8 FF")
+                return False
+            haystack = self._data
+            target = pattern
         else:
             pattern = needle.encode("utf-8")
-        self._matches = []
+            # bytes.lower() 对 ASCII 做大小写折叠;搜索 ASCII 时不区分大小写。
+            haystack = self._data.lower()
+            target = pattern.lower()
+        if not pattern:
+            self._clear_search()
+            self.match_label.setText("请输入搜索内容")
+            return False
+        matches: list[int] = []
         start = 0
         while True:
-            pos = self._data.find(pattern, start)
+            pos = haystack.find(target, start)
             if pos < 0:
                 break
-            self._matches.append(pos)
+            matches.append(pos)
             start = pos + 1
+        self._matches = matches
         self._match_pos = -1
-        if self._matches:
-            self.match_label.setText(f"共 {len(self._matches)} 处命中")
-            self._step(1)
-        else:
-            self.match_label.setText("未找到")
+        self._search_key = (needle, mode, len(self._data))
+        if matches:
+            self.model.set_search_matches(matches, len(pattern))
+            self.match_label.setText(f"共 {len(matches)} 处命中")
+            if step:
+                self._step(1, ensure=False)
+            return True
+        self.model.clear_highlights()
+        self.match_label.setText("未找到")
+        return False
 
-    def _step(self, delta: int) -> None:
+    def _on_search(self) -> None:
+        self._run_search(step=True)
+
+    def _step(self, delta: int, ensure: bool = True) -> None:
+        key = (
+            self.search_edit.text(),
+            self.search_mode.currentData() or "ascii",
+            len(self._data),
+        )
+        if ensure and key != self._search_key:
+            if not self._run_search(step=False):
+                return
         if not self._matches:
             return
         self._match_pos = (self._match_pos + delta) % len(self._matches)
         offset = self._matches[self._match_pos]
         self.match_label.setText(f"第 {self._match_pos + 1}/{len(self._matches)} 处 @ 0x{offset:X}")
         self.goto_offset(offset)
+        # 选中单元格的底色会盖住精确字节高亮,搜索跳转后只保留当前单元格。
+        self.table.clearSelection()
 
     def _copy_selection(self) -> None:
-        rows = sorted({i.row() for i in self.table.selectionModel().selectedRows()})
+        indexes = self.table.selectionModel().selectedIndexes()
+        rows = sorted({i.row() for i in indexes})
         if not rows:
             index = self.table.currentIndex()
             if index.isValid():

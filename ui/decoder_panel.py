@@ -27,6 +27,13 @@ from PySide6.QtWidgets import (
 from core.chain import smart_decode
 from core.codecs import get_all
 from core.codecs.base import CodecBase, CodecError
+from ui.highlight import (
+    FLAG_BG,
+    FLAG_FG,
+    has_flag,
+    hidden_count,
+    install_flag_highlighter,
+)
 
 
 class DecoderPanel(QWidget):
@@ -107,6 +114,7 @@ class DecoderPanel(QWidget):
         self.input_edit = QPlainTextEdit()
         self.input_edit.setPlaceholderText("在此粘贴明文或密文,支持乱码输入……")
         self.input_edit.setMaximumHeight(130)
+        install_flag_highlighter(self.input_edit)
         layout.addWidget(self.input_edit)
 
         # 输出区 + 复制
@@ -124,7 +132,14 @@ class DecoderPanel(QWidget):
         self.output_edit = QPlainTextEdit()
         self.output_edit.setReadOnly(True)
         self.output_edit.setMaximumHeight(130)
+        install_flag_highlighter(self.output_edit)
         layout.addWidget(self.output_edit)
+
+        self.hidden_label = QLabel("")
+        self.hidden_label.setStyleSheet("color:#c77dff;")
+        self.hidden_label.hide()
+        self.output_edit.textChanged.connect(self._update_hidden_label)
+        layout.addWidget(self.hidden_label)
 
         # 智能解码结果
         layout.addWidget(QLabel("智能解码结果(双击填入输出区):"))
@@ -134,6 +149,14 @@ class DecoderPanel(QWidget):
         self.result_tree.setColumnWidth(1, 560)
         self.result_tree.itemDoubleClicked.connect(self._on_hit_double_clicked)
         layout.addWidget(self.result_tree)
+
+    def _update_hidden_label(self) -> None:
+        count = hidden_count(self.output_edit.toPlainText())
+        if count:
+            self.hidden_label.setText(f"⚠ 输出中包含 {count} 个零宽/隐藏字符")
+            self.hidden_label.show()
+        else:
+            self.hidden_label.hide()
 
     # ---------------- 参数区动态刷新 ----------------
     def _current_codec(self) -> CodecBase:
@@ -357,6 +380,9 @@ class DecoderPanel(QWidget):
             preview = self._display(hit.output).replace("\n", " ⏎ ")[:120]
             item = QTreeWidgetItem([" → ".join(hit.path), preview, f"{hit.score:.2f}"])
             item.setData(0, Qt.UserRole, hit.output)
+            if has_flag(hit.output):
+                item.setBackground(1, FLAG_BG)
+                item.setForeground(1, FLAG_FG)
             self.result_tree.addTopLevelItem(item)
 
     def _on_hit_double_clicked(self, item: QTreeWidgetItem, _col: int) -> None:

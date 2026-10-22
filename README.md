@@ -1,6 +1,6 @@
 # MiscKit — CTF Misc 桌面工具箱
 
-一个基于 **PySide6** 的本地 CTF 杂项题辅助工具。当前版本已完成「编码解码」工作台（**35 种**编解码算法、一键多层链式智能解码）、「文件分析」页签（**类型识别 / 文件头检测 / 结构解析 / 可编辑 Hex / 熵图 / 字符串**）、「图片隐写」页签（**预览 / LSB 位平面 / LSB 提取 / PNG CRC 与宽高修复 / EXIF / GIF 帧**）以及「ZIP 破解」页签。
+一个基于 **PySide6** 的本地 CTF 杂项题辅助工具。当前版本包含「编码解码」（**35 种**算法、一键多层链式智能解码）、「文件分析」（**类型识别 / 文件头 / 结构 / 嵌套文件 / 可编辑 Hex / 熵图 / 字符串**）、「图片隐写」（**LSB 行信息 / PNG Chunk / 通道与 XOR / PNG 修复 / EXIF / GIF 帧**）、「音频 LSB」和「ZIP 分析」页签。
 
 ## 功能特性
 
@@ -10,23 +10,35 @@
 - **单向算法保护**：MD5 等不可逆算法自动禁用解码按钮
 - **字节级无损往返**：内部使用 `surrogateescape`，乱码输入也不会崩溃或丢字节
 - **统一错误提示**：所有失败均抛 `CodecError`，界面直接显示中文原因（例如「不是合法的 Base85：包含非法字符 ','」）
-- **拖放分发**：把文件拖进窗口，按类型自动跳到对应页签
+- **拖放分发**：按文件头而不是扩展名分发,扩展名写错或文件头前有垃圾数据也能识别
 - **文件分析**：
-  - magic bytes 识别 40+ 格式，检测扩展名伪造并给出修复建议
-  - **文件头检测**：实际前 16 字节（Hex + ASCII）与期望 magic、匹配状态、magic 偏移
+  - magic bytes 识别 40+ 格式，检测扩展名伪造并给出修复建议；对 `BM` / `MZ` 等弱签名做结构校验，避免文本误报
+  - **文件头检测**：实际前 16 字节（Hex + ASCII）与期望 magic、匹配状态、magic 偏移；支持前置垃圾数据检测
+  - **文本编码**：UTF-8 / UTF-16 / GB18030 自动识别，中文文本不再被当成未知二进制
   - **图片基本信息**：宽高、位深、颜色类型、隔行、帧数、DPI、IDAT 大小、像素总数
-  - 结构解析：PNG（chunk + **CRC 校验**）、JPG（段列表）、GIF（帧）、BMP、ZIP（本地头/中央目录 + **伪加密标记**）
+  - 结构解析：PNG（chunk + **CRC 校验**）、JPG（含渐进式 JPEG 多扫描）、GIF（多帧）、BMP、ZIP（EOCD 校验、ZIP64、注释、伪加密标记）
   - **尾随数据检测**：文件逻辑结束后附加的隐藏内容（内嵌 ZIP/PNG、ASCII 提示）
-  - **可编辑 Hex 查看器**：双击改字节、撤销/重做（Ctrl+Z/Ctrl+Y）、Ctrl+S 写回、另存为；修改后自动重新识别与解析
+  - **嵌套文件检测**：binwalk 风格扫描内嵌 PNG/JPEG/GIF/ZIP/PDF/ELF 等,支持单个/批量提取
+  - **编码特征检测**：URL、可解码 Base64、可解码 Hex 片段及偏移
+  - **可编辑 Hex 查看器**：双击改字节、撤销/重做（Ctrl+Z/Ctrl+Y）、覆盖保存/保存副本；只读文件禁止修改并提示
+  - **Hex 搜索**：ASCII/Hex 下拉模式；ASCII 不区分大小写；无需先“查找全部”即可直接上一个/下一个；命中字节在 Hex/ASCII 单元格中精确高亮
+  - **双击编辑**：在 Hex 表格中双击具体字节修改；只读文件禁止修改并提示
   - 数据检查器：光标处 uint8/16/32/64、int、float/double（双端序）、时间戳
-  - 字符串提取（正则过滤）、熵图、MD5/SHA1/SHA256/CRC32
+  - 字符串提取（正则过滤、结果上限）、熵图、MD5/SHA1/SHA256/CRC32
 - **图片隐写**：
-  - 图片预览（PNG/JPG/GIF/BMP/WEBP 等）
+  - 图片预览（PNG/JPG/GIF/BMP/WEBP 等），支持前置垃圾数据的图片
   - **LSB 位平面可视化**：R/G/B/A × bit 0~7 任意切换
-  - **LSB 数据提取**：按通道与位序号提取隐藏位流，文本/Hex 预览，一键保存
-  - **PNG 修复**：逐个 chunk 校验 CRC、一键重算 CRC、按填写或 IDAT 推算的真实尺寸修复 IHDR 宽高
-  - **EXIF 表格**：制造商、型号、拍摄时间、曝光、焦距、用户注释等
-  - **GIF 逐帧浏览**
+  - **LSB 数据提取**：MSB/LSB-first、多通道（RGB/RGBA/全部）、起始像素/步长/最大长度、UTF-8/UTF-16/GB18030/Latin-1 文本预览
+  - **LSB 行信息(随波逐流式)**：遍历单通道/三通道/四通道顺序,整图或逐行提取 LSB 文本,flag 行优先显示
+  - **原始像素模式**：索引色保留调色板索引,16-bit 保留原始低/高字节；JPEG 给出有损警告
+  - **PNG 修复**：逐个 chunk 校验 CRC、一键重算 CRC、按 IDAT 候选尺寸修复 IHDR 宽高（多候选时要求确认）
+  - **PNG Chunk**：全部 chunk 列表、tEXt/zTXt/iTXt/eXIf 提取、APNG 控制块提示、文本导出
+  - **EXIF 表格**：JPEG APP1 / PNG eXIf / TIFF；制造商、拍摄时间、GPS 经纬度/海拔、缩略图信息
+  - **图像工具**：通道灰度图、反色、XOR、差分、RGB 直方图、结果保存
+  - **GIF 逐帧浏览**：顺序读入帧缓存，避免 Qt `jumpToImage` 在 GIF 上不可用的问题
+- **音频 LSB**：WAV 元信息、通道/位/位序选择、采样 LSB 提取与保存
+- **ZIP 分析**：条目列表、压缩包注释、伪加密检测/修复、安全解压
+- **隐藏字符高亮**：flag/ctf/key、花括号、零宽字符高亮(不区分大小写),输出区显示零宽字符数量
 - **双向联动**：结构树 / 字符串双击直接跳到 Hex 对应偏移
 
 ## 目录结构
@@ -36,19 +48,25 @@ MiscKit/
 ├── main.py                      # 程序入口
 ├── requirements.txt
 ├── ui/
-│   ├── main_window.py           # 主窗口:4 页签 + 拖放分发
+│   ├── main_window.py           # 主窗口:5 页签 + 拖放分发
 │   ├── decoder_panel.py         # 编码解码工作台
-│   ├── file_panel.py            # 文件分析:概览 / 文件头 / 结构 / 字符串 / 熵图
-│   ├── image_panel.py           # 图片隐写:LSB / PNG 修复 / EXIF / GIF 帧
-│   ├── hex_viewer.py            # 通用 Hex 查看器组件(虚拟滚动 + 编辑 + 撤销)
-│   └── zip_panel.py             # ZIP 破解(占位)
+│   ├── file_panel.py            # 文件分析:概览 / 文件头 / 结构 / 嵌套 / 字符串 / 熵图
+│   ├── image_panel.py           # 图片:LSB / 行信息 / PNG Chunk / 图像工具 / 修复 / EXIF / GIF
+│   ├── audio_panel.py           # WAV 元信息与 LSB 提取
+│   ├── hex_viewer.py            # Hex 查看器(虚拟滚动 + 编辑 + 只读 + 搜索高亮)
+│   ├── highlight.py             # flag/ctf/花括号/零宽字符高亮
+│   └── zip_panel.py             # ZIP 分析:条目/注释/伪加密修复/安全解压
 └── core/
     ├── chain.py                 # 一键智能解码:BFS + 启发式剪枝
-    ├── filetype.py              # magic bytes 识别 + 文件头检测 + 尾随数据
-    ├── fileparse.py             # 结构解析 + PNG 信息/CRC/宽高修复 + EXIF + GIF 帧
+    ├── filetype.py              # magic 识别 + 弱签名校验 + 前置数据 + 尾随数据
+    ├── fileparse.py             # 结构解析 + PNG 信息/Chunk/CRC/宽高 + EXIF + GIF
+    ├── filecarve.py             # 内嵌文件扫描与提取(轻量 binwalk)
+    ├── detect.py                # URL / Base64 / Hex 编码特征检测
+    ├── imagetools.py            # 通道 / 反色 / XOR / 差分 / 直方图
+    ├── audio.py                 # WAV 元信息 + 采样 LSB
     ├── analysis.py              # 哈希 / 熵 / 字符串 / 数据解释
-    ├── lsb.py                   # LSB 位平面与按位提取
-    ├── zipcrack.py              # 后续模块占位
+    ├── lsb.py                   # LSB 位平面、位序、多通道、行信息扫描
+    ├── zipcrack.py              # ZIP 结构检查与伪加密检测/修复
     └── codecs/
         ├── __init__.py          # 导入实现模块 → 自动注册
         ├── base.py              # CodecBase 统一接口 + 可读性评分
@@ -161,10 +179,30 @@ from core.codecs import my_module  # noqa: F401
 
 ## 已知限制 / 规划
 
-- [x] 「文件分析」页签：类型识别、文件头检测、结构解析（PNG/JPG/GIF/BMP/ZIP）、可编辑 Hex、字符串、熵图、尾随数据检测
-- [x] 图片隐写：LSB 位平面 / 数据提取、PNG CRC 与宽高修复、EXIF 表格、GIF 帧浏览
-- [x] Hex 支持双击改字节、撤销/重做、Ctrl+S 写回与另存为
-- [ ] EXIF 仅解析常用标签；缩略图与 GPS 明细尚未展开
-- [ ] 「ZIP 破解」页签：伪加密修复、CRC32 爆破、字典爆破 — 目前为占位
+- [x] 「文件分析」页签：类型识别、弱签名校验、前置数据/文件头检测、结构解析、嵌套文件扫描与提取、编码特征检测、可编辑 Hex、字符串、熵图、尾随数据检测
+- [x] 图片隐写：LSB 位平面 / 位序 / 多通道 / 行信息、原始索引/16-bit、PNG Chunk 工具箱、通道/XOR/差分/直方图、PNG CRC 与宽高候选修复、EXIF、GIF 帧浏览
+- [x] Hex 支持双击改字节、撤销/重做、覆盖保存/保存副本；只读文件禁止修改；搜索支持 ASCII/Hex 下拉、大小写不敏感和高亮
+- [x] 音频 LSB：WAV 元信息、通道/位/位序、采样 LSB 提取
+- [x] 「ZIP 分析」页签：条目列表、注释、伪加密检测/修复、安全解压
+- [ ] EXIF 解析常用标签和 GPS/缩略图，但厂商私有标签、XMP/ICC 尚未完整覆盖
+- [ ] ZIP 密码爆破（CRC32 反查 / 字典）尚未实现，建议使用 Kali 的 `fcrackzip` / `john`
+- [ ] 音频频谱、PCAP、PDF/Office、二维码/OCR、完整 binwalk 签名库属于后续模块
 - [ ] JSFuck 解码依赖本机 `node` 命令，未安装时给出明确提示
 - [ ] PyInstaller 打包为独立 exe 尚待完成
+
+## 与 Kali 工具的分工
+
+以下功能需要大量外部依赖、原生库或 GPU/字典资源，**不建议塞进本工具**，建议在 Kali 里用成熟工具处理：
+
+| 场景 | 建议工具 |
+|---|---|
+| 文件雕刻 / 递归提取 | `binwalk -e`、`foremost`、`scalpel` |
+| ZIP/RAR 密码爆破 | `fcrackzip`、`zip2john` + `john`、`hashcat` |
+| PNG 深度检查 | `pngcheck`、`pngcrush` |
+| 图片隐写 | `zsteg`、`steghide`、`outguess` |
+| 音频频谱 | Audacity、Sonic Visualiser、`sox` |
+| PCAP | Wireshark、`tshark`、`tcpflow` |
+| 二维码 / OCR | `zbarimg`、`tesseract` |
+| PDF / Office | `pdf-parser`、`olevba`、`exiftool` |
+
+本工具保留「离线、单文件、Python 依赖少」的定位；需要外部工具时，优先让用户用系统命令完成，而不是在 PySide6 里重写一遍。

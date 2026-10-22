@@ -54,7 +54,8 @@ def byte_histogram(data: bytes) -> list[int]:
     return counts
 
 
-def strings(data: bytes, min_len: int = 4, pattern: str = "") -> list[tuple[int, str]]:
+def strings(data: bytes, min_len: int = 4, pattern: str = "",
+            limit: int = 0) -> list[tuple[int, str]]:
     """提取连续可打印字符串(等价 strings 命令),pattern 为正则过滤。"""
     if min_len < 1:
         min_len = 1
@@ -70,6 +71,8 @@ def strings(data: bytes, min_len: int = 4, pattern: str = "") -> list[tuple[int,
         else:
             if len(buf) >= min_len:
                 _push(out, bytes(buf), start, rx)
+                if limit and len(out) >= limit:
+                    return out
             buf = bytearray()
     if len(buf) >= min_len:
         _push(out, bytes(buf), start, rx)
