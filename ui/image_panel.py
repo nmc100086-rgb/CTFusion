@@ -29,6 +29,7 @@ from core import fileparse
 from core import imagetools, lsb
 from core.filetype import identify
 from ui.highlight import install_flag_highlighter, mark_item
+from ui.stegsolve_panel import StegSolvePanel
 
 _GIF_MAX_FRAMES = 500
 
@@ -96,6 +97,8 @@ class ImagePanel(QWidget):
         self.tabs.addTab(self._build_repair(), "图片修复")
         self.tabs.addTab(self._build_chunks(), "PNG Chunk")
         self.tabs.addTab(self._build_tools(), "图像工具")
+        self.stegsolve = StegSolvePanel()
+        self.tabs.addTab(self.stegsolve, "StegSolve")
         self.tabs.addTab(self._build_exif(), "EXIF")
         self.tabs.addTab(self._build_frames(), "GIF 帧")
         splitter.addWidget(self.tabs)
@@ -577,6 +580,7 @@ class ImagePanel(QWidget):
             label += f"  [前置数据 {self._prefix} 字节]"
         self.file_label.setText(label)
         self._load_image()
+        self.stegsolve.set_image(self._image)
         self._refresh_info()
         self._refresh_repair()
         self._refresh_chunks()
@@ -995,6 +999,7 @@ class ImagePanel(QWidget):
             return
         self._show_frame(index)
         self._set_pixels(self._gif_frames[index])
+        self.stegsolve.set_image(self._gif_frames[index])
         self._sync_frame_combos(index, self.frame_combo)
 
     def _on_lsb_frame(self, index: int) -> None:
@@ -1002,4 +1007,5 @@ class ImagePanel(QWidget):
             return
         self._set_pixels(self._gif_frames[index])
         self._show_frame(index)
+        self.stegsolve.set_image(self._gif_frames[index])
         self._sync_frame_combos(index, self.lsb_frame)

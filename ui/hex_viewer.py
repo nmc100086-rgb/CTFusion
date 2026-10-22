@@ -46,34 +46,26 @@ class HexTableModel(QAbstractTableModel):
     def __init__(self, data: bytes = b"") -> None:
         super().__init__()
         self._data = data
-        self._highlight_rows: set[int] = set()
         self._highlight_bytes: set[int] = set()
 
     def set_data(self, data: bytes) -> None:
         self.beginResetModel()
         self._data = data
-        self._highlight_rows.clear()
         self._highlight_bytes.clear()
         self.endResetModel()
 
     def set_search_matches(self, offsets: list[int], length: int) -> None:
-        rows: set[int] = set()
         bytes_set: set[int] = set()
         for offset in offsets:
-            first_row = offset // _BYTES_PER_ROW
-            last_row = (offset + max(1, length) - 1) // _BYTES_PER_ROW
-            rows.update(range(first_row, last_row + 1))
             bytes_set.update(range(offset, offset + max(1, length)))
-        self._highlight_rows = rows
         self._highlight_bytes = bytes_set
         if self._data:
             self.dataChanged.emit(self.index(0, 0),
                                   self.index(self.rowCount() - 1, self.COLS - 1))
 
     def clear_highlights(self) -> None:
-        if not self._highlight_rows and not self._highlight_bytes:
+        if not self._highlight_bytes:
             return
-        self._highlight_rows.clear()
         self._highlight_bytes.clear()
         if self._data:
             self.dataChanged.emit(self.index(0, 0),
@@ -178,20 +170,22 @@ class HexDelegate(QStyledItemDelegate):
         y0 = opt.rect.top()
         height = opt.rect.height()
         # 命中字节的背景
+        # 亮黄色底 + 深色字,避免深色底把原本的文字盖住。
+        highlight = QColor("#ffd54f")
         if index.column() == 1:
             for pos in matched:
                 start = pos * 3
                 x = x0 + metrics.horizontalAdvance(text[:start])
                 width = metrics.horizontalAdvance(text[start:start + 2])
-                painter.fillRect(QRect(x, y0, width, height), QColor("#8a6a00"))
+                painter.fillRect(QRect(x, y0, width, height), highlight)
         else:
             for pos in matched:
                 if pos >= len(text):
                     continue
                 x = x0 + metrics.horizontalAdvance(text[:pos])
                 width = metrics.horizontalAdvance(text[pos])
-                painter.fillRect(QRect(x, y0, width, height), QColor("#8a6a00"))
-        painter.setPen(opt.palette.color(QPalette.Text))
+                painter.fillRect(QRect(x, y0, width, height), highlight)
+        painter.setPen(QColor("#111111"))
         painter.drawText(opt.rect.adjusted(4, 0, -4, 0), Qt.AlignVCenter, text)
         painter.restore()
 

@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core import audio, fileparse, lsb, zipcrack  # noqa: E402
+from core import audio, fileparse, lsb, stegsolve, zipcrack  # noqa: E402
 from core.analysis import digests, entropy, interpret_at, strings  # noqa: E402
 from core.detect import detect_encodings  # noqa: E402
 from core.filetype import identify  # noqa: E402
@@ -375,6 +375,15 @@ class ImageAnalysisTests(unittest.TestCase):
         self.assertEqual(
             lsb.extract_bytes(pixels, 2, 0, 0, channels_sel=(0, 1)), b"\x9C")
 
+    def test_stegsolve_multibit_extract(self):
+        bits = [(byte >> shift) & 1 for byte in b"A" for shift in range(7, -1, -1)]
+        pixels = b"".join(bytes([bit, 0, 0, 255]) for bit in bits)
+        self.assertEqual(
+            stegsolve.extract_selected(pixels, 4, {0: {0}}, (0,)), b"A")
+        self.assertEqual(
+            stegsolve.extract_selected(pixels, 4, {0: {0}}, (0,),
+                                       bit_order="lsb"), b"\x82")
+
     def test_lsb_row_scan_finds_flag_in_single_channel(self):
         message = b"flag{row_scan}"
         bits = [(byte >> shift) & 1 for byte in message for shift in range(7, -1, -1)]
@@ -723,6 +732,21 @@ class ImagePanelSmokeTests(unittest.TestCase):
             panel._on_extract()
             self.assertEqual(len(panel._extracted), 6)
             self.assertIn("RGB", panel.lsb_output.toPlainText())
+        finally:
+            window.close()
+
+    def test_stegsolve_data_extract_ui(self):
+        window = MainWindow()
+        try:
+            panel = window.image_panel
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "img.png")
+                with open(path, "wb") as f:
+                    f.write(self._png_bytes())
+                panel.load_file(path)
+            panel.stegsolve._on_extract()
+            self.assertEqual(len(panel.stegsolve._extracted), 2)
+            self.assertTrue(panel.stegsolve.btn_save_extract.isEnabled())
         finally:
             window.close()
 

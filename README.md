@@ -35,6 +35,7 @@
   - **PNG Chunk**：全部 chunk 列表、tEXt/zTXt/iTXt/eXIf 提取、APNG 控制块提示、文本导出
   - **EXIF 表格**：JPEG APP1 / PNG eXIf / TIFF；制造商、拍摄时间、GPS 经纬度/海拔、缩略图信息
   - **图像工具**：通道灰度图、反色、XOR、差分、RGB 直方图、结果保存
+  - **StegSolve 风格工具**：Data Extract（多通道多 bit 平面、通道顺序、位序、bit 平面顺序）、Image Combiner（XOR/ADD/SUB/AND/OR/MIN/MAX/DIFF）、Stereogram 深度图、Random Color Map
   - **GIF 逐帧浏览**：顺序读入帧缓存，避免 Qt `jumpToImage` 在 GIF 上不可用的问题
 - **音频 LSB**：WAV 元信息、通道/位/位序选择、采样 LSB 提取与保存
 - **ZIP 分析**：条目列表、压缩包注释、伪加密检测/修复、安全解压
@@ -51,7 +52,8 @@ MiscKit/
 │   ├── main_window.py           # 主窗口:5 页签 + 拖放分发
 │   ├── decoder_panel.py         # 编码解码工作台
 │   ├── file_panel.py            # 文件分析:概览 / 文件头 / 结构 / 嵌套 / 字符串 / 熵图
-│   ├── image_panel.py           # 图片:LSB / 行信息 / PNG Chunk / 图像工具 / 修复 / EXIF / GIF
+│   ├── image_panel.py           # 图片:LSB / 行信息 / PNG Chunk / 图像工具 / StegSolve / 修复 / EXIF / GIF
+│   ├── stegsolve_panel.py       # StegSolve:Data Extract / Combiner / Stereogram / Color Map
 │   ├── audio_panel.py           # WAV 元信息与 LSB 提取
 │   ├── hex_viewer.py            # Hex 查看器(虚拟滚动 + 编辑 + 只读 + 搜索高亮)
 │   ├── highlight.py             # flag/ctf/花括号/零宽字符高亮
@@ -62,7 +64,8 @@ MiscKit/
     ├── fileparse.py             # 结构解析 + PNG 信息/Chunk/CRC/宽高 + EXIF + GIF
     ├── filecarve.py             # 内嵌文件扫描与提取(轻量 binwalk)
     ├── detect.py                # URL / Base64 / Hex 编码特征检测
-    ├── imagetools.py            # 通道 / 反色 / XOR / 差分 / 直方图
+    ├── imagetools.py            # 通道 / 反色 / 组合运算 / 直方图 / 随机色 / 立体图
+    ├── stegsolve.py             # StegSolve Data Extract 的位流提取
     ├── audio.py                 # WAV 元信息 + 采样 LSB
     ├── analysis.py              # 哈希 / 熵 / 字符串 / 数据解释
     ├── lsb.py                   # LSB 位平面、位序、多通道、行信息扫描
@@ -183,7 +186,9 @@ from core.codecs import my_module  # noqa: F401
 - [x] 图片隐写：LSB 位平面 / 位序 / 多通道 / 行信息、原始索引/16-bit、PNG Chunk 工具箱、通道/XOR/差分/直方图、PNG CRC 与宽高候选修复、EXIF、GIF 帧浏览
 - [x] Hex 支持双击改字节、撤销/重做、覆盖保存/保存副本；只读文件禁止修改；搜索支持 ASCII/Hex 下拉、大小写不敏感和高亮
 - [x] 音频 LSB：WAV 元信息、通道/位/位序、采样 LSB 提取
+- [x] StegSolve 风格工具：Data Extract、Image Combiner、Stereogram、Random Color Map
 - [x] 「ZIP 分析」页签：条目列表、注释、伪加密检测/修复、安全解压
+- [ ] Stereogram 为简化深度图算法，不等同于 StegSolve 的完整实现；复杂立体图仍建议用原工具
 - [ ] EXIF 解析常用标签和 GPS/缩略图，但厂商私有标签、XMP/ICC 尚未完整覆盖
 - [ ] ZIP 密码爆破（CRC32 反查 / 字典）尚未实现，建议使用 Kali 的 `fcrackzip` / `john`
 - [ ] 音频频谱、PCAP、PDF/Office、二维码/OCR、完整 binwalk 签名库属于后续模块
