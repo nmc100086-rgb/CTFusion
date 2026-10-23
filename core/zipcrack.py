@@ -7,13 +7,29 @@ CPU 时间,后者依赖外部字典文件,放到 Kali 的 fcrackzip/john 更合�
 from __future__ import annotations
 
 import binascii
+import itertools
+import os
+import threading
+import time
+import zipfile
 import zlib
 from dataclasses import dataclass, field
+from typing import Callable, Iterator
 
 from core import fileparse
 
 _LOCAL = b"PK\x03\x04"
 _CENTRAL = b"PK\x01\x02"
+
+_MASK_SETS = {
+    "l": "abcdefghijklmnopqrstuvwxyz",
+    "u": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "d": "0123456789",
+    "h": "0123456789abcdef",
+    "H": "0123456789ABCDEF",
+    "s": "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
+    "a": "".join(chr(i) for i in range(32, 127)),
+}
 
 
 @dataclass
@@ -27,6 +43,7 @@ class ZipEntry:
     local_offset: int
     central_offset: int
     local_flags: int | None = None
+    aes: bool = False
     pseudo: bool = False
     reason: str = ""
 
@@ -43,6 +60,18 @@ def _decode_name(raw: bytes, flags: int) -> str:
         return raw.decode("utf-8" if flags & 0x800 else "gbk", "replace")
     except LookupError:
         return raw.decode("utf-8", "replace")
+
+
+def _has_aes_extra(extra: bytes) -> bool:
+    """检查 WinZip AES extra field 0x9901。Python zipfile 不支持 AES 解密。"""
+    pos = 0
+    while pos + 4 <= len(extra):
+        tag = int.from_bytes(extra[pos:pos + 2], "little")
+        size = int.from_bytes(extra[pos + 2:pos + 4], "little")
+        if tag == 0x9901:
+            return True
+        pos += 4 + size
+    return False
 
 
 def _try_plain_data(data: bytes, entry: ZipEntry) -> bool:
@@ -107,7 +136,10 @@ def inspect(data: bytes) -> ZipInspect:
         clen = int.from_bytes(data[pos + 32:pos + 34], "little")
         lho = int.from_bytes(data[pos + 42:pos + 46], "little")
         name = _decode_name(data[pos + 46:pos + 46 + nlen], flags)
+        extra_off = pos + 46 + nlen
+        extra = data[extra_off:extra_off + elen]
         entry = ZipEntry(name, flags, method, crc, csize, usize, lho, pos)
+        entry.aes = bool(flags & 1) and _has_aes_extra(extra)
         if lho + 30 <= len(data) and data[lho:lho + 4] == _LOCAL:
             entry.local_flags = int.from_bytes(data[lho + 6:lho + 8], "little")
             if bool(entry.local_flags & 1) != bool(flags & 1):
@@ -135,3 +167,246 @@ def repair_pseudo_encryption(data: bytes) -> tuple[bytes, int]:
             out[entry.local_offset + 6] &= 0xFE
         count += 1
     return bytes(out), count
+
+
+# ---------------------------------------------------------------- 密码恢复
+
+@dataclass
+class CrackConfig:
+    path: str
+    mode: str = "dictionary"       # dictionary / brute / mask
+    wordlist: str = ""
+    charset: str = "abcdefghijklmnopqrstuvwxyz0123456789"
+    min_length: int = 1
+    max_length: int = 6
+    mask: str = "?l?l?l?l"
+    encoding: str = "utf-8"        # utf-8 / gbk / auto
+    max_candidates: int = 0
+
+
+@dataclass
+class CrackResult:
+    password: str | None = None
+    password_bytes: bytes = b""
+    tried: int = 0
+    elapsed: float = 0.0
+    speed: float = 0.0
+    cancelled: bool = False
+    error: str = ""
+    entry_name: str = ""
+    path: str = ""
+
+
+def parse_mask(mask: str) -> list[str]:
+    """解析 ?l/?u/?d/?h/?H/?s/?a/?? 掩码,返回每个位置的字符集。"""
+    sets: list[str] = []
+    pos = 0
+    while pos < len(mask):
+        ch = mask[pos]
+        if ch == "?":
+            if pos + 1 >= len(mask):
+                sets.append("?")
+                break
+            code = mask[pos + 1]
+            if code == "?":
+                sets.append("?")
+            elif code in _MASK_SETS:
+                sets.append(_MASK_SETS[code])
+            else:
+                sets.append(code)
+            pos += 2
+            continue
+        sets.append(ch)
+        pos += 1
+    return sets
+
+
+def _iter_mask(mask: str) -> Iterator[str]:
+    sets = parse_mask(mask)
+    if not sets or any(not chars for chars in sets):
+        return
+    for values in itertools.product(*sets):
+        yield "".join(values)
+
+
+def _count_mask(mask: str) -> int:
+    sets = parse_mask(mask)
+    total = 1
+    for chars in sets:
+        total *= max(1, len(chars))
+    return total
+
+
+def _file_encoding(encoding: str) -> str:
+    return "utf-8" if encoding == "auto" else encoding
+
+
+def _iter_wordlist(path: str, encoding: str) -> Iterator[str]:
+    with open(path, "r", encoding=_file_encoding(encoding), errors="replace") as f:
+        for line in f:
+            yield line.rstrip("\r\n")
+
+
+def _count_wordlist(path: str, encoding: str) -> int:
+    count = 0
+    with open(path, "r", encoding=_file_encoding(encoding), errors="replace") as f:
+        for _ in f:
+            count += 1
+    return count
+
+
+def _password_bytes(text: str, encoding: str) -> list[bytes]:
+    if encoding == "auto":
+        result = []
+        for enc in ("utf-8", "gbk"):
+            try:
+                result.append(text.encode(enc))
+            except UnicodeEncodeError:
+                pass
+        return result
+    try:
+        return [text.encode(encoding)]
+    except (UnicodeEncodeError, LookupError):
+        return []
+
+
+class ZipCracker:
+    """单进程 ZIP 密码恢复器。
+
+    选择最小的加密条目做校验,避免每次解压大文件;每轮复用 ZipFile 句柄。
+    """
+
+    def __init__(self, config: CrackConfig) -> None:
+        self.config = config
+        self._zf: zipfile.ZipFile | None = None
+        self._entry: zipfile.ZipInfo | None = None
+
+    def _open(self) -> str:
+        try:
+            self._zf = zipfile.ZipFile(self.config.path, "r")
+        except (OSError, zipfile.BadZipFile) as e:
+            return f"无法打开 ZIP:{e}"
+        infos = [info for info in self._zf.infolist() if info.flag_bits & 1]
+        if not infos:
+            self._zf.close()
+            self._zf = None
+            return "未发现加密条目(可能只是伪加密,请先尝试修复伪加密)"
+        if all(self._has_aes(info) for info in infos):
+            self._zf.close()
+            self._zf = None
+            return "该 ZIP 使用 AES/WinZip 加密,Python zipfile 不支持;请改用 7-Zip 或 ARCHPR"
+        infos = [info for info in infos if not self._has_aes(info)]
+        self._entry = min(infos, key=lambda item: (item.file_size, item.compress_size))
+        return ""
+
+    @staticmethod
+    def _has_aes(info: zipfile.ZipInfo) -> bool:
+        return _has_aes_extra(info.extra)
+
+    def _check(self, candidate: str) -> bytes | None:
+        if self._zf is None or self._entry is None:
+            return None
+        for password in _password_bytes(candidate, self.config.encoding):
+            try:
+                self._zf.read(self._entry, pwd=password)
+                return password
+            except Exception:
+                # 错误密码可能表现为 RuntimeError, 也可能在 deflate 阶段
+                # 抛 zlib.error / EOFError;这里都视为候选失败。
+                continue
+        return None
+
+    def _total(self) -> int:
+        cfg = self.config
+        try:
+            if cfg.mode == "dictionary":
+                return _count_wordlist(cfg.wordlist, cfg.encoding)
+            if cfg.mode == "mask":
+                return _count_mask(cfg.mask)
+            if cfg.mode == "brute":
+                chars = len(cfg.charset)
+                return sum(chars ** length
+                           for length in range(cfg.min_length, cfg.max_length + 1))
+        except (OSError, UnicodeError):
+            return 0
+        return 0
+
+    def _candidates(self) -> Iterator[str]:
+        cfg = self.config
+        if cfg.mode == "dictionary":
+            if not cfg.wordlist:
+                raise ValueError("请选择字典文件")
+            yield from _iter_wordlist(cfg.wordlist, cfg.encoding)
+        elif cfg.mode == "mask":
+            yield from _iter_mask(cfg.mask)
+        elif cfg.mode == "brute":
+            if not cfg.charset:
+                raise ValueError("暴力破解字符集不能为空")
+            for length in range(cfg.min_length, cfg.max_length + 1):
+                for values in itertools.product(cfg.charset, repeat=length):
+                    yield "".join(values)
+        else:
+            raise ValueError(f"未知攻击模式:{cfg.mode}")
+
+    def crack(self, progress: Callable[[int, int, float, str], None] | None = None,
+              cancel: threading.Event | None = None) -> CrackResult:
+        config = self.config
+        start = time.monotonic()
+        error = self._open()
+        if error:
+            return CrackResult(error=error)
+        assert self._zf is not None and self._entry is not None
+        total = self._total()
+        tried = 0
+        last_report = 0.0
+        try:
+            for candidate in self._candidates():
+                if cancel is not None and cancel.is_set():
+                    return CrackResult(tried=tried, elapsed=time.monotonic() - start,
+                                       cancelled=True, entry_name=self._entry.filename)
+                tried += 1
+                matched = self._check(candidate)
+                if matched is not None:
+                    elapsed = time.monotonic() - start
+                    return CrackResult(
+                        password=candidate, password_bytes=matched,
+                        tried=tried, elapsed=elapsed,
+                        speed=tried / elapsed if elapsed else 0.0,
+                        entry_name=self._entry.filename,
+                    )
+                if config.max_candidates and tried >= config.max_candidates:
+                    break
+                now = time.monotonic()
+                if progress is not None and (now - last_report >= 0.15 or tried == 1):
+                    last_report = now
+                    elapsed = now - start
+                    progress(tried, total, tried / elapsed if elapsed else 0.0, candidate)
+        except (OSError, UnicodeError, ValueError) as e:
+            return CrackResult(tried=tried, elapsed=time.monotonic() - start,
+                               error=str(e), entry_name=self._entry.filename)
+        finally:
+            self._zf.close()
+        elapsed = time.monotonic() - start
+        return CrackResult(tried=tried, elapsed=elapsed,
+                           speed=tried / elapsed if elapsed else 0.0,
+                           entry_name=self._entry.filename)
+
+
+def recover_zip(config: CrackConfig,
+                progress: Callable[[int, int, float, str], None] | None = None,
+                cancel: threading.Event | None = None) -> CrackResult:
+    result = ZipCracker(config).crack(progress=progress, cancel=cancel)
+    result.path = config.path
+    return result
+
+
+def format_duration(seconds: float) -> str:
+    if seconds < 0 or seconds == float("inf"):
+        return "--"
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes, sec = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m{sec:02d}s"

@@ -1,6 +1,6 @@
 # MiscKit — CTF Misc 桌面工具箱
 
-一个基于 **PySide6** 的本地 CTF 杂项题辅助工具。当前版本包含「编码解码」（**35 种**算法、一键多层链式智能解码）、「文件分析」（**类型识别 / 文件头 / 结构 / 嵌套文件 / 可编辑 Hex / 熵图 / 字符串**）、「图片隐写」（**LSB 行信息 / PNG Chunk / 通道与 XOR / PNG 修复 / EXIF / GIF 帧**）、「音频 LSB」和「ZIP 分析」页签。
+一个基于 **PySide6** 的本地 CTF 杂项题辅助工具。当前版本包含「编码解码」（**35 种**算法、一键多层链式智能解码）、「文件分析」（**类型识别 / 文件头 / 结构 / 嵌套文件 / 可编辑 Hex / 熵图 / 字符串**）、「图片隐写」（**LSB 行信息 / PNG Chunk / 通道与 XOR / PNG 修复 / EXIF / GIF 帧**）、「音频 LSB」和「ZIP 分析 / 密码恢复」页签。
 
 ## 功能特性
 
@@ -38,7 +38,7 @@
   - **StegSolve 风格工具**：Data Extract（多通道多 bit 平面、通道顺序、位序、bit 平面顺序）、Image Combiner（XOR/ADD/SUB/AND/OR/MIN/MAX/DIFF）、Stereogram 深度图、Random Color Map
   - **GIF 逐帧浏览**：顺序读入帧缓存，避免 Qt `jumpToImage` 在 GIF 上不可用的问题
 - **音频 LSB**：WAV 元信息、通道/位/位序选择、采样 LSB 提取与保存
-- **ZIP 分析**：条目列表、压缩包注释、伪加密检测/修复、安全解压
+- **ZIP 分析 / 密码恢复**：条目列表、注释、伪加密检测/修复、安全解压；字典/暴力/掩码三种 ZipCrypto 密码恢复模式，带进度、速度、ETA、停止和结果复制
 - **隐藏字符高亮**：flag/ctf/key、花括号、零宽字符高亮(不区分大小写),输出区显示零宽字符数量
 - **双向联动**：结构树 / 字符串双击直接跳到 Hex 对应偏移
 
@@ -57,7 +57,7 @@ MiscKit/
 │   ├── audio_panel.py           # WAV 元信息与 LSB 提取
 │   ├── hex_viewer.py            # Hex 查看器(虚拟滚动 + 编辑 + 只读 + 搜索高亮)
 │   ├── highlight.py             # flag/ctf/花括号/零宽字符高亮
-│   └── zip_panel.py             # ZIP 分析:条目/注释/伪加密修复/安全解压
+│   └── zip_panel.py             # ZIP:结构/伪加密/字典/暴力/掩码密码恢复/安全解压
 └── core/
     ├── chain.py                 # 一键智能解码:BFS + 启发式剪枝
     ├── filetype.py              # magic 识别 + 弱签名校验 + 前置数据 + 尾随数据
@@ -69,7 +69,7 @@ MiscKit/
     ├── audio.py                 # WAV 元信息 + 采样 LSB
     ├── analysis.py              # 哈希 / 熵 / 字符串 / 数据解释
     ├── lsb.py                   # LSB 位平面、位序、多通道、行信息扫描
-    ├── zipcrack.py              # ZIP 结构检查与伪加密检测/修复
+    ├── zipcrack.py              # ZIP 结构/伪加密 + ZipCrypto 密码恢复
     └── codecs/
         ├── __init__.py          # 导入实现模块 → 自动注册
         ├── base.py              # CodecBase 统一接口 + 可读性评分
@@ -84,6 +84,29 @@ MiscKit/
         ├── zerowidth.py         # 零宽字符
         └── hill.py / rot.py     # Hill 密码 / ROT13、Atbash
 ```
+
+## 打包为 exe
+
+使用 PyInstaller **onedir 便携版**，带图标和版本信息：
+
+```powershell
+.\build_exe.ps1
+```
+
+如果执行策略禁止脚本：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
+```
+
+输出：
+
+```text
+dist/MiscKit v1.0/MiscKit v1.0.exe
+dist/MiscKit v1.0/_internal/
+```
+
+`MiscKit v1.0.exe` 必须和同目录的 `_internal` 一起分发。修改源码后运行 `.\rebuild.ps1` 重新打包。详见 [README_BUILD.md](README_BUILD.md)。
 
 ## 环境要求
 
@@ -187,10 +210,10 @@ from core.codecs import my_module  # noqa: F401
 - [x] Hex 支持双击改字节、撤销/重做、覆盖保存/保存副本；只读文件禁止修改；搜索支持 ASCII/Hex 下拉、大小写不敏感和高亮
 - [x] 音频 LSB：WAV 元信息、通道/位/位序、采样 LSB 提取
 - [x] StegSolve 风格工具：Data Extract、Image Combiner、Stereogram、Random Color Map
-- [x] 「ZIP 分析」页签：条目列表、注释、伪加密检测/修复、安全解压
+- [x] 「ZIP 分析」页签：条目列表、注释、伪加密检测/修复、安全解压、ZipCrypto 字典/暴力/掩码密码恢复
 - [ ] Stereogram 为简化深度图算法，不等同于 StegSolve 的完整实现；复杂立体图仍建议用原工具
 - [ ] EXIF 解析常用标签和 GPS/缩略图，但厂商私有标签、XMP/ICC 尚未完整覆盖
-- [ ] ZIP 密码爆破（CRC32 反查 / 字典）尚未实现，建议使用 Kali 的 `fcrackzip` / `john`
+- [ ] ZIP 密码恢复目前只支持 ZipCrypto；AES/WinZip 加密 ZIP 和 RAR/7z 请使用 7-Zip、ARCHPR 或 Kali 的 `john`
 - [ ] 音频频谱、PCAP、PDF/Office、二维码/OCR、完整 binwalk 签名库属于后续模块
 - [ ] JSFuck 解码依赖本机 `node` 命令，未安装时给出明确提示
 - [ ] PyInstaller 打包为独立 exe 尚待完成

@@ -8,6 +8,7 @@ import os
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import wave
 import zipfile
@@ -151,6 +152,48 @@ def zip_bytes() -> bytes:
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("flag.txt", "hello misc")
     return buf.getvalue()
+
+
+def zipcrypto_bytes(password: str, content: bytes = b"hello misc",
+                    name: str = "flag.txt") -> bytes:
+    """构造一个最小 ZipCrypto 加密 ZIP,用于验证密码恢复。"""
+    name_raw = name.encode("utf-8")
+    crc = zlib.crc32(content) & 0xFFFFFFFF
+    keys = [0x12345678, 0x23456789, 0x34567890]
+    crc_table = []
+    for value in range(256):
+        table_crc = value
+        for _ in range(8):
+            table_crc = (table_crc >> 1) ^ 0xEDB88320 if table_crc & 1 else table_crc >> 1
+        crc_table.append(table_crc)
+
+    def crc32_byte(byte: int, crc: int) -> int:
+        return (crc >> 8) ^ crc_table[(crc ^ byte) & 0xFF]
+
+    def update(byte: int) -> None:
+        keys[0] = crc32_byte(byte, keys[0])
+        keys[1] = ((keys[1] + (keys[0] & 0xFF)) * 134775813 + 1) & 0xFFFFFFFF
+        keys[2] = crc32_byte((keys[1] >> 24) & 0xFF, keys[2])
+
+    def encrypt(byte: int) -> int:
+        temp = (keys[2] | 2) & 0xFFFF
+        result = byte ^ (((temp * (temp ^ 1)) >> 8) & 0xFF)
+        update(byte)
+        return result
+
+    for char in password.encode("utf-8"):
+        update(char)
+    header = bytes([0] * 11 + [(crc >> 24) & 0xFF])
+    encrypted = bytes(encrypt(byte) for byte in header + content)
+    csize = len(encrypted)
+    usize = len(content)
+
+    local = struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 1, 0, 0, 0,
+                        crc, csize, usize, len(name_raw), 0) + name_raw + encrypted
+    central = struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, 1, 0, 0, 0,
+                          crc, csize, usize, len(name_raw), 0, 0, 0, 0, 0, 0) + name_raw
+    eocd = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 1, 1, len(central), len(local), 0)
+    return local + central + eocd
 
 
 def exif_jpg_bytes() -> bytes:
@@ -395,6 +438,35 @@ class ImageAnalysisTests(unittest.TestCase):
         self.assertTrue(single.has_flag)
 
 
+class ZipCrackTests(unittest.TestCase):
+    def test_zipcrypto_fixture(self):
+        data = zipcrypto_bytes("a1")
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            self.assertEqual(zf.read("flag.txt", pwd=b"a1"), b"hello misc")
+
+    def test_dictionary_bruteforce_and_mask(self):
+        data = zipcrypto_bytes("a1")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "secret.zip")
+            with open(path, "wb") as f:
+                f.write(data)
+            wordlist = os.path.join(tmp, "words.txt")
+            with open(wordlist, "w", encoding="utf-8") as f:
+                f.write("wrong\na1\n")
+
+            dictionary = zipcrack.recover_zip(zipcrack.CrackConfig(
+                path=path, mode="dictionary", wordlist=wordlist))
+            self.assertEqual(dictionary.password, "a1")
+
+            brute = zipcrack.recover_zip(zipcrack.CrackConfig(
+                path=path, mode="brute", charset="a1", min_length=2, max_length=2))
+            self.assertEqual(brute.password, "a1")
+
+            mask = zipcrack.recover_zip(zipcrack.CrackConfig(
+                path=path, mode="mask", mask="?l?d"))
+            self.assertEqual(mask.password, "a1")
+
+
 class AudioTests(unittest.TestCase):
     def test_wav_info_and_lsb(self):
         data = wav_lsb_bytes()
@@ -602,6 +674,62 @@ class FilePanelSmokeTests(unittest.TestCase):
             self.assertEqual(panel.embedded_table.rowCount(), 1)
             self.assertEqual(panel.embedded_table.item(0, 1).text(), "ZIP")
             self.assertEqual(int(panel.embedded_table.item(0, 2).text()), len(zip_bytes()))
+        finally:
+            window.close()
+
+    def test_zip_recovery_ui_speed_and_stop_restart(self):
+        window = MainWindow()
+        try:
+            panel = window.zip_panel
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "secret.zip")
+                with open(path, "wb") as f:
+                    f.write(zipcrypto_bytes("7639"))
+                panel.load_file(path)
+                panel.mode_combo.setCurrentIndex(
+                    panel.mode_combo.findData("brute"))
+                panel.charset_edit.setText("0123456789")
+                panel.min_length.setValue(4)
+                panel.max_length.setValue(4)
+                started = time.monotonic()
+                panel._on_start()
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and not panel._found_password:
+                    self.app.processEvents()
+                    time.sleep(0.005)
+                self.assertEqual(panel._found_password, "7639")
+                self.assertLess(time.monotonic() - started, 5.0)
+
+                # 等线程完全退出,再启动一个会跑很久的任务并停止。
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and panel._worker is not None:
+                    self.app.processEvents()
+                    time.sleep(0.01)
+                self.assertTrue(panel.btn_start.isEnabled())
+                panel.charset_edit.setText("0123456789abcdef")
+                panel.min_length.setValue(1)
+                panel.max_length.setValue(9)
+                panel._on_start()
+                time.sleep(0.1)
+                self.app.processEvents()
+                panel._on_stop()
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and panel._worker is not None:
+                    self.app.processEvents()
+                    time.sleep(0.01)
+                self.assertTrue(panel.btn_start.isEnabled())
+                self.assertFalse(panel.btn_stop.isEnabled())
+
+                # 停止后还能再次开始/停止。
+                panel._on_start()
+                time.sleep(0.05)
+                self.app.processEvents()
+                panel._on_stop()
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and panel._worker is not None:
+                    self.app.processEvents()
+                    time.sleep(0.01)
+                self.assertTrue(panel.btn_start.isEnabled())
         finally:
             window.close()
 

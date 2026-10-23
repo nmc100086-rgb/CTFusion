@@ -91,4 +91,5 @@ class MainWindow(QMainWindow):
         if not self.file_panel._confirm_discard():
             event.ignore()
             return
+        self.zip_panel.shutdown()
         super().closeEvent(event)
