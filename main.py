@@ -7,7 +7,7 @@ from ui.main_window import MainWindow
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("MiscKit")
+    app.setApplicationName("CTFusion")
     window = MainWindow()
     window.show()
     return app.exec()

@@ -388,9 +388,9 @@ class ImagePanel(QWidget):
             with open(path, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines))
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"导出失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"导出失败:{e}")
             return
-        QMessageBox.information(self, "MiscKit", f"已导出:\n{path}")
+        QMessageBox.information(self, "CTFusion", f"已导出:\n{path}")
 
     def _build_tools(self) -> QWidget:
         page = QWidget()
@@ -474,11 +474,11 @@ class ImagePanel(QWidget):
             with open(path, "rb") as f:
                 data = f.read()
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"读取失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"读取失败:{e}")
             return None
         image = QImage.fromData(data)
         if image.isNull():
-            QMessageBox.warning(self, "MiscKit", "无法解码该图片")
+            QMessageBox.warning(self, "CTFusion", "无法解码该图片")
             return None
         return image
 
@@ -490,7 +490,7 @@ class ImagePanel(QWidget):
             return
         result = imagetools.xor_images(self._image, other)
         if result is None:
-            QMessageBox.warning(self, "MiscKit", "两张图片尺寸必须相同")
+            QMessageBox.warning(self, "CTFusion", "两张图片尺寸必须相同")
             return
         self._show_tool_image(result, "XOR 结果(相同像素为黑)")
 
@@ -502,7 +502,7 @@ class ImagePanel(QWidget):
             return
         result = imagetools.difference(self._image, other)
         if result is None:
-            QMessageBox.warning(self, "MiscKit", "两张图片尺寸必须相同")
+            QMessageBox.warning(self, "CTFusion", "两张图片尺寸必须相同")
             return
         self._show_tool_image(result, "差分结果(|A-B|)")
 
@@ -523,7 +523,7 @@ class ImagePanel(QWidget):
         if not path:
             return
         if not self._tool_image.save(path, "PNG"):
-            QMessageBox.warning(self, "MiscKit", "保存失败")
+            QMessageBox.warning(self, "CTFusion", "保存失败")
             return
         self.tool_log.appendPlainText(f"已保存:{path}")
 
@@ -567,7 +567,7 @@ class ImagePanel(QWidget):
             with open(path, "rb") as f:
                 data = f.read()
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"读取文件失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"读取文件失败:{e}")
             return
         result = identify(data, os.path.basename(path))
         self._path = path
@@ -786,7 +786,7 @@ class ImagePanel(QWidget):
 
     def _on_save_lsb(self) -> None:
         if not self._extracted:
-            QMessageBox.information(self, "MiscKit", "请先提取 LSB 数据")
+            QMessageBox.information(self, "CTFusion", "请先提取 LSB 数据")
             return
         base = os.path.splitext(self._path)[0] or "lsb"
         path, _ = QFileDialog.getSaveFileName(self, "保存提取数据", base + "_lsb.bin")
@@ -796,9 +796,9 @@ class ImagePanel(QWidget):
             with open(path, "wb") as f:
                 f.write(self._extracted)
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"保存失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
             return
-        QMessageBox.information(self, "MiscKit", f"已保存 {len(self._extracted):,} 字节:\n{path}")
+        QMessageBox.information(self, "CTFusion", f"已保存 {len(self._extracted):,} 字节:\n{path}")
 
     # ---------------- PNG 修复 ----------------
     def _refresh_repair(self) -> None:
@@ -859,7 +859,7 @@ class ImagePanel(QWidget):
                     f.write(self._data[:self._prefix])
                 f.write(data)
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"保存失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
             return None
         return path
 
@@ -868,14 +868,14 @@ class ImagePanel(QWidget):
         if info is None:
             return
         if not info.crc_errors:
-            QMessageBox.information(self, "MiscKit", "所有 chunk 的 CRC 均正确,无需修复")
+            QMessageBox.information(self, "CTFusion", "所有 chunk 的 CRC 均正确,无需修复")
             return
         fixed = fileparse.repair_png_crc(self._payload)
         path = self._save_bytes(fixed, "crcfix")
         if not path:
             return
         self._log(f"✓ 已修复 {len(info.crc_errors)} 个 CRC 并保存:{path}")
-        QMessageBox.information(self, "MiscKit", f"CRC 修复完成:\n{path}")
+        QMessageBox.information(self, "CTFusion", f"CRC 修复完成:\n{path}")
 
     def _on_fix_size(self) -> None:
         if self._kind != "PNG":
@@ -886,24 +886,24 @@ class ImagePanel(QWidget):
         if not path:
             return
         self._log(f"✓ 已将 IHDR 改为 {width} x {height} 并重算 CRC:{path}")
-        QMessageBox.information(self, "MiscKit", f"宽高修复完成:\n{path}")
+        QMessageBox.information(self, "CTFusion", f"宽高修复完成:\n{path}")
 
     def _on_auto_size(self) -> None:
         info = fileparse.png_info(self._payload)
         candidates = fileparse.png_size_candidates(self._payload)
         if info is None or not candidates:
-            QMessageBox.warning(self, "MiscKit", "无法从 IDAT 推算尺寸(可能已截断或为隔行 PNG)")
+            QMessageBox.warning(self, "CTFusion", "无法从 IDAT 推算尺寸(可能已截断或为隔行 PNG)")
             return
         actual = candidates[0]
         if actual == (info.width, info.height):
             QMessageBox.information(
-                self, "MiscKit",
+                self, "CTFusion",
                 f"IHDR 与 IDAT 推算一致({actual[0]} x {actual[1]}),无需修复")
             return
         if len(candidates) > 1:
             preview = "\n".join(f"  {w} x {h}" for w, h in candidates[:8])
             choice = QMessageBox.question(
-                self, "MiscKit",
+                self, "CTFusion",
                 f"检测到 {len(candidates)} 个可能的尺寸,优先候选为 "
                 f"{actual[0]} x {actual[1]}:\n{preview}\n\n"
                 "是否使用该候选修复?",
@@ -919,7 +919,7 @@ class ImagePanel(QWidget):
         if not path:
             return
         self._log(f"✓ 已按 IDAT 推算尺寸 {actual[0]} x {actual[1]} 修复:{path}")
-        QMessageBox.information(self, "MiscKit", f"宽高自动修复完成:\n{path}")
+        QMessageBox.information(self, "CTFusion", f"宽高自动修复完成:\n{path}")
 
     # ---------------- EXIF ----------------
     def _refresh_exif(self) -> None:

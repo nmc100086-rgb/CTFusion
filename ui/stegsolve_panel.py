@@ -139,7 +139,7 @@ class StegSolvePanel(QWidget):
             return
         selected = self._selected_bits()
         if not selected:
-            QMessageBox.information(self, "MiscKit", "请至少勾选一个 bit 平面")
+            QMessageBox.information(self, "CTFusion", "请至少勾选一个 bit 平面")
             return
         order = self.channel_order.currentData() or (0, 1, 2)
         self._extracted = stegsolve.extract_selected(
@@ -168,9 +168,9 @@ class StegSolvePanel(QWidget):
             with open(path, "wb") as f:
                 f.write(self._extracted)
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"保存失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
             return
-        QMessageBox.information(self, "MiscKit", f"已保存 {len(self._extracted):,} 字节")
+        QMessageBox.information(self, "CTFusion", f"已保存 {len(self._extracted):,} 字节")
 
     # ---------------- Image Combiner ----------------
     def _build_combiner(self) -> QWidget:
@@ -209,7 +209,7 @@ class StegSolvePanel(QWidget):
             return None
         image = QImage(path)
         if image.isNull():
-            QMessageBox.warning(self, "MiscKit", "无法解码该图片")
+            QMessageBox.warning(self, "CTFusion", "无法解码该图片")
             return None
         return image
 
@@ -222,7 +222,7 @@ class StegSolvePanel(QWidget):
         result = imagetools.combine(
             self._image, other, self.combine_op.currentData() or "xor")
         if result is None:
-            QMessageBox.warning(self, "MiscKit", "两张图片尺寸必须相同")
+            QMessageBox.warning(self, "CTFusion", "两张图片尺寸必须相同")
             return
         self._set_result(result, self.combine_preview, self.btn_save_combine)
 
@@ -262,7 +262,7 @@ class StegSolvePanel(QWidget):
         result = imagetools.stereogram(
             self._image, self.min_offset.value(), self.max_offset.value())
         if result is None:
-            QMessageBox.warning(self, "MiscKit", "图片尺寸过小,无法计算")
+            QMessageBox.warning(self, "CTFusion", "图片尺寸过小,无法计算")
             return
         self._set_result(result, self.stereo_preview, self.btn_save_stereo)
 
@@ -312,9 +312,9 @@ class StegSolvePanel(QWidget):
         if not path:
             return
         if not self._result_image.save(path, "PNG"):
-            QMessageBox.warning(self, "MiscKit", "保存失败")
+            QMessageBox.warning(self, "CTFusion", "保存失败")
             return
-        QMessageBox.information(self, "MiscKit", f"已保存:\n{path}")
+        QMessageBox.information(self, "CTFusion", f"已保存:\n{path}")
 
     def set_image(self, image: QImage | None) -> None:
         self._image = image

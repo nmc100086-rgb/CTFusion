@@ -1,4 +1,4 @@
-# MiscKit 源码 / 重新打包
+# CTFusion 源码 / 重新打包
 
 项目源码就在当前目录。
 
@@ -17,10 +17,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\rebuild.ps1
 输出：
 
 ```text
-dist\MiscKit v1.0\MiscKit v1.0.exe
+dist\CTFusion v2.0\CTFusion v2.0.exe
 ```
 
-这是 PyInstaller **onedir 便携版**：`MiscKit v1.0.exe` 必须和同目录的 `_internal` 文件夹放在一起，整个 `dist\MiscKit v1.0` 目录一起分发。
+这是 PyInstaller **onedir 便携版**：`CTFusion v2.0.exe` 必须和同目录的 `_internal` 文件夹放在一起，整个 `dist\CTFusion v2.0` 目录一起分发。
 
 之所以不再使用 onefile：onefile 每次启动都要把 100MB+ 运行库解压到临时目录，在带杀软的机器上启动会非常慢；onedir 实测启动约 3~5 秒。
 

@@ -1,6 +1,6 @@
-# MiscKit — CTF Misc 桌面工具箱
+# CTFusion — CTF 多工具桌面工具箱
 
-一个基于 **PySide6** 的本地 CTF 杂项题辅助工具。当前版本包含「编码解码」（**35 种**算法、一键多层链式智能解码）、「文件分析」（**类型识别 / 文件头 / 结构 / 嵌套文件 / 可编辑 Hex / 熵图 / 字符串**）、「图片隐写」（**LSB 行信息 / PNG Chunk / 通道与 XOR / PNG 修复 / EXIF / GIF 帧**）、「音频 LSB」和「ZIP 分析 / 密码恢复」页签。
+一个基于 **PySide6** 的本地 CTF 综合工具。当前版本包含「编码解码」（**35 种**算法、一键多层链式智能解码）、「文件分析」（**类型识别 / 结构 / 嵌套 / 可编辑 Hex / 字符串 / 多文件栏**）、「图片隐写」（**LSB / PNG Chunk / StegSolve / EXIF / GIF**）、「音频 LSB」、「ZIP 分析 / 密码恢复」、「JWT 解析与伪造」和「代码格式化」。
 
 ## 功能特性
 
@@ -11,6 +11,7 @@
 - **字节级无损往返**：内部使用 `surrogateescape`，乱码输入也不会崩溃或丢字节
 - **统一错误提示**：所有失败均抛 `CodecError`，界面直接显示中文原因（例如「不是合法的 Base85：包含非法字符 ','」）
 - **拖放分发**：按文件头而不是扩展名分发,扩展名写错或文件头前有垃圾数据也能识别
+- **多文件栏**：类似 WPS 的顶部文件页签，支持一次打开多个文件、切换和关闭，Ctrl+O / Ctrl+W
 - **文件分析**：
   - magic bytes 识别 40+ 格式，检测扩展名伪造并给出修复建议；对 `BM` / `MZ` 等弱签名做结构校验，避免文本误报
   - **文件头检测**：实际前 16 字节（Hex + ASCII）与期望 magic、匹配状态、magic 偏移；支持前置垃圾数据检测
@@ -21,7 +22,7 @@
   - **嵌套文件检测**：binwalk 风格扫描内嵌 PNG/JPEG/GIF/ZIP/PDF/ELF 等,支持单个/批量提取
   - **编码特征检测**：URL、可解码 Base64、可解码 Hex 片段及偏移
   - **可编辑 Hex 查看器**：双击改字节、撤销/重做（Ctrl+Z/Ctrl+Y）、覆盖保存/保存副本；只读文件禁止修改并提示
-  - **Hex 搜索**：ASCII/Hex 下拉模式；ASCII 不区分大小写；无需先“查找全部”即可直接上一个/下一个；命中字节在 Hex/ASCII 单元格中精确高亮
+  - **Hex 搜索**：ASCII/Hex 下拉模式；ASCII 不区分大小写；无需先“查找全部”即可直接上一个/下一个；命中字节在 Hex/ASCII 单元格中精确高亮；编辑/撤销后自动保留搜索条件和结果
   - **双击编辑**：在 Hex 表格中双击具体字节修改；只读文件禁止修改并提示
   - 数据检查器：光标处 uint8/16/32/64、int、float/double（双端序）、时间戳
   - 字符串提取（正则过滤、结果上限）、熵图、MD5/SHA1/SHA256/CRC32
@@ -38,23 +39,27 @@
   - **StegSolve 风格工具**：Data Extract（多通道多 bit 平面、通道顺序、位序、bit 平面顺序）、Image Combiner（XOR/ADD/SUB/AND/OR/MIN/MAX/DIFF）、Stereogram 深度图、Random Color Map
   - **GIF 逐帧浏览**：顺序读入帧缓存，避免 Qt `jumpToImage` 在 GIF 上不可用的问题
 - **音频 LSB**：WAV 元信息、通道/位/位序选择、采样 LSB 提取与保存
-- **ZIP 分析 / 密码恢复**：条目列表、注释、伪加密检测/修复、安全解压；字典/暴力/掩码三种 ZipCrypto 密码恢复模式，带进度、速度、ETA、停止和结果复制
+- **ZIP 分析 / 密码恢复**：条目列表、注释、伪加密检测/修复、安全解压；字典/暴力/掩码三种 ZipCrypto 密码恢复模式，带进度、速度、ETA、停止和结果复制；掩码支持 `?l ?u ?d ?c ?h ?H ?s ?a`，裸 `?` 按字母+数字处理
+- **JWT 工具**：解析 header/payload/signature、签名校验、HS256/384/512 生成、`none` 伪造、RS256 私钥签名、复制 Token
+- **代码格式化**：JSON、Python、JavaScript、HTML、CSS、C、C++、Java、PHP；保留字符串/注释的花括号缩进器，适合 CTF 里不规则的代码
 - **隐藏字符高亮**：flag/ctf/key、花括号、零宽字符高亮(不区分大小写),输出区显示零宽字符数量
 - **双向联动**：结构树 / 字符串双击直接跳到 Hex 对应偏移
 
 ## 目录结构
 
 ```
-MiscKit/
+CTFusion/
 ├── main.py                      # 程序入口
 ├── requirements.txt
 ├── ui/
-│   ├── main_window.py           # 主窗口:5 页签 + 拖放分发
+│   ├── main_window.py           # 主窗口:7 页签 + 多文件栏 + 拖放分发
 │   ├── decoder_panel.py         # 编码解码工作台
 │   ├── file_panel.py            # 文件分析:概览 / 文件头 / 结构 / 嵌套 / 字符串 / 熵图
 │   ├── image_panel.py           # 图片:LSB / 行信息 / PNG Chunk / 图像工具 / StegSolve / 修复 / EXIF / GIF
 │   ├── stegsolve_panel.py       # StegSolve:Data Extract / Combiner / Stereogram / Color Map
 │   ├── audio_panel.py           # WAV 元信息与 LSB 提取
+│   ├── jwt_panel.py             # JWT 解析 / 签名 / 伪造
+│   ├── code_panel.py            # 代码格式化
 │   ├── hex_viewer.py            # Hex 查看器(虚拟滚动 + 编辑 + 只读 + 搜索高亮)
 │   ├── highlight.py             # flag/ctf/花括号/零宽字符高亮
 │   └── zip_panel.py             # ZIP:结构/伪加密/字典/暴力/掩码密码恢复/安全解压
@@ -70,6 +75,8 @@ MiscKit/
     ├── analysis.py              # 哈希 / 熵 / 字符串 / 数据解释
     ├── lsb.py                   # LSB 位平面、位序、多通道、行信息扫描
     ├── zipcrack.py              # ZIP 结构/伪加密 + ZipCrypto 密码恢复
+    ├── jwt_tool.py              # JWT 解析/签名/伪造
+    ├── codefmt.py               # JSON/Python/C-like/HTML/CSS 格式化
     └── codecs/
         ├── __init__.py          # 导入实现模块 → 自动注册
         ├── base.py              # CodecBase 统一接口 + 可读性评分
@@ -102,11 +109,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
 输出：
 
 ```text
-dist/MiscKit v1.0/MiscKit v1.0.exe
-dist/MiscKit v1.0/_internal/
+dist/CTFusion v2.0/CTFusion v2.0.exe
+dist/CTFusion v2.0/_internal/
 ```
 
-`MiscKit v1.0.exe` 必须和同目录的 `_internal` 一起分发。修改源码后运行 `.\rebuild.ps1` 重新打包。详见 [README_BUILD.md](README_BUILD.md)。
+`CTFusion v2.0.exe` 必须和同目录的 `_internal` 一起分发。修改源码后运行 `.\rebuild.ps1` 重新打包。详见 [README_BUILD.md](README_BUILD.md)。
 
 ## 环境要求
 

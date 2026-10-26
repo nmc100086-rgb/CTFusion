@@ -393,7 +393,7 @@ class DecoderPanel(QWidget):
 
     # ---------------- 工具 ----------------
     def _info(self, msg: str) -> None:
-        QMessageBox.information(self, "MiscKit 提示", msg)
+        QMessageBox.information(self, "CTFusion 提示", msg)
 
     @staticmethod
     def _display(s: str) -> str:

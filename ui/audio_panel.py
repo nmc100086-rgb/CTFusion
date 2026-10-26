@@ -102,13 +102,13 @@ class AudioPanel(QWidget):
             with open(path, "rb") as f:
                 data = f.read()
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"读取文件失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"读取文件失败:{e}")
             return False
         result = identify(data, os.path.basename(path))
         payload = data[result.prefix:]
         info = audio.read_info(payload)
         if info is None:
-            QMessageBox.warning(self, "MiscKit", "不是有效的 WAV/PCM 文件")
+            QMessageBox.warning(self, "CTFusion", "不是有效的 WAV/PCM 文件")
             return False
         self._path = path
         self._data = data
@@ -169,6 +169,6 @@ class AudioPanel(QWidget):
             with open(path, "wb") as f:
                 f.write(self._extracted)
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"保存失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
             return
-        QMessageBox.information(self, "MiscKit", f"已保存 {len(self._extracted):,} 字节:\n{path}")
+        QMessageBox.information(self, "CTFusion", f"已保存 {len(self._extracted):,} 字节:\n{path}")

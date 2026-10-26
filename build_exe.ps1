@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$NoClean
 )
 
@@ -9,7 +9,7 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     throw "Python not found. Install Python 3.10+ and add it to PATH."
 }
 
-$name = "MiscKit v1.0"
+$name = "CTFusion v2.0"
 $distRoot = Join-Path $PSScriptRoot "dist"
 $argsList = @(
     "-m", "PyInstaller",
@@ -17,7 +17,7 @@ $argsList = @(
     "--onedir",
     "--windowed",
     "--name", $name,
-    "--icon", "assets\MiscKit.ico",
+    "--icon", "assets\CTFusion.ico",
     "--version-file", "packaging\version_info.txt",
     "--distpath", $distRoot,
     "--workpath", (Join-Path $PSScriptRoot "build"),
@@ -46,8 +46,8 @@ if (-not (Test-Path -LiteralPath $exe)) {
 }
 
 Remove-Item -LiteralPath (Join-Path $PSScriptRoot "build") -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath (Join-Path $PSScriptRoot "MiscKit.spec") -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath (Join-Path $PSScriptRoot "MiscKit v1.0.spec") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $PSScriptRoot "CTFusion.spec") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $PSScriptRoot "CTFusion v2.0.spec") -Force -ErrorAction SilentlyContinue
 Get-ChildItem -LiteralPath $PSScriptRoot -Recurse -Directory -Filter "__pycache__" |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 

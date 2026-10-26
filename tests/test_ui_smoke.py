@@ -1,6 +1,6 @@
-"""MiscKit 编码/解码页签的离屏冒烟测试。
+"""CTFusion 编码/解码页签的离屏冒烟测试。
 
-运行方式(在 MiscKit 目录下):
+运行方式(在 CTFusion 目录下):
     python -m unittest discover -s tests -v
 """
 

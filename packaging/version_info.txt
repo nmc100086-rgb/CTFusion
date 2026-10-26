@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(2, 0, 0, 0),
+    prodvers=(2, 0, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -15,14 +15,14 @@ VSVersionInfo(
         StringTable(
           '080404B0',
           [
-            StringStruct('CompanyName', 'MiscKit'),
-            StringStruct('FileDescription', 'MiscKit CTF Misc Tool'),
-            StringStruct('FileVersion', '1.0.0.0'),
-            StringStruct('InternalName', 'MiscKit'),
+            StringStruct('CompanyName', 'CTFusion'),
+            StringStruct('FileDescription', 'CTFusion CTF Multi Tool'),
+            StringStruct('FileVersion', '2.0.0.0'),
+            StringStruct('InternalName', 'CTFusion'),
             StringStruct('LegalCopyright', ''),
-            StringStruct('OriginalFilename', 'MiscKit v1.0.exe'),
-            StringStruct('ProductName', 'MiscKit v1.0'),
-            StringStruct('ProductVersion', '1.0.0.0')
+            StringStruct('OriginalFilename', 'CTFusion v2.0.exe'),
+            StringStruct('ProductName', 'CTFusion v2.0'),
+            StringStruct('ProductVersion', '2.0.0.0')
           ]
         )
       ]

@@ -372,7 +372,7 @@ class HexViewer(QWidget):
         self._redo.clear()
         self._modified = True
         self._update_state()
-        self._clear_search()
+        self._refresh_search_after_edit()
         self.dataEdited.emit()
         return True
 
@@ -388,7 +388,7 @@ class HexViewer(QWidget):
             self._redo.append((offset, old, new))
             self._modified = True
             self._update_state()
-            self._clear_search()
+            self._refresh_search_after_edit()
             self.dataEdited.emit()
 
     def redo(self) -> None:
@@ -403,7 +403,7 @@ class HexViewer(QWidget):
             self._undo.append((offset, old, new))
             self._modified = True
             self._update_state()
-            self._clear_search()
+            self._refresh_search_after_edit()
             self.dataEdited.emit()
 
     def save_to(self, path: str) -> bool:
@@ -411,7 +411,7 @@ class HexViewer(QWidget):
             with open(path, "wb") as f:
                 f.write(self._data)
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"保存失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
             return False
         self._modified = False
         self._update_state()
@@ -434,6 +434,14 @@ class HexViewer(QWidget):
         self._search_key = None
         self.model.clear_highlights()
         self.match_label.setText("")
+
+    def _refresh_search_after_edit(self) -> None:
+        """编辑/撤销后沿用当前搜索条件重新计算,而不是把搜索清空。"""
+        if not self.search_edit.text().strip():
+            self._clear_search()
+            return
+        self._search_key = None
+        self._run_search(step=False)
 
     # ---------------- 交互 ----------------
     def _on_goto(self) -> None:
@@ -464,7 +472,7 @@ class HexViewer(QWidget):
         offset = max(0, min(offset, len(self._data) - 1))
         if self._read_only:
             QMessageBox.warning(
-                self, "MiscKit",
+                self, "CTFusion",
                 "当前文件是只读的,不能直接修改。\n"
                 "可以双击前先复制一份,或使用「保存副本…」保存修改后的副本。")
             return
@@ -481,10 +489,10 @@ class HexViewer(QWidget):
         try:
             value = int(text.strip().lower().removeprefix("0x"), 16)
         except ValueError:
-            QMessageBox.warning(self, "MiscKit", "请输入 00-FF 之间的十六进制值")
+            QMessageBox.warning(self, "CTFusion", "请输入 00-FF 之间的十六进制值")
             return
         if not 0 <= value <= 0xFF:
-            QMessageBox.warning(self, "MiscKit", "字节值必须在 00-FF 之间")
+            QMessageBox.warning(self, "CTFusion", "字节值必须在 00-FF 之间")
             return
         if self.apply_edit(offset, bytes([value])):
             self.goto_offset(offset)

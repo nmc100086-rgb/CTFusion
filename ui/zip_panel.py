@@ -240,12 +240,12 @@ class ZipPanel(QWidget):
         line = QHBoxLayout()
         line.addWidget(QLabel("掩码:"))
         self.mask_edit = QLineEdit("?l?l?l?l")
-        self.mask_edit.setPlaceholderText("例如 ?l?l?d?d, 支持 ?l ?u ?d ?h ?H ?s ?a ??")
+        self.mask_edit.setPlaceholderText("例如 qctf2026???? 或 ?l?l?d?d")
         line.addWidget(self.mask_edit, 1)
         layout.addLayout(line)
         help_label = QLabel(
-            "?l=小写  ?u=大写  ?d=数字  ?h=小写hex  ?H=大写hex  "
-            "?s=符号  ?a=全部可打印  ??=问号")
+            "?l=小写  ?u=大写  ?d=数字  ?c=字母+数字  ?h=小写hex  "
+            "?H=大写hex  ?s=符号  ?a=全部可打印  ?=字母+数字  \\?=字面问号")
         help_label.setStyleSheet("color:#888;")
         layout.addWidget(help_label)
         return group
@@ -266,7 +266,7 @@ class ZipPanel(QWidget):
 
     def _on_start(self) -> None:
         if not self._path:
-            QMessageBox.information(self, "MiscKit", "请先打开 ZIP 文件")
+            QMessageBox.information(self, "CTFusion", "请先打开 ZIP 文件")
             return
         if self._worker is not None:
             return
@@ -383,7 +383,7 @@ class ZipPanel(QWidget):
             with open(path, "rb") as f:
                 data = f.read()
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"读取文件失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"读取文件失败:{e}")
             return False
         self._path = path
         self._data = data
@@ -452,7 +452,7 @@ class ZipPanel(QWidget):
             return
         fixed, count = zipcrack.repair_pseudo_encryption(self._data)
         if not count:
-            QMessageBox.information(self, "MiscKit", "没有需要修复的伪加密条目")
+            QMessageBox.information(self, "CTFusion", "没有需要修复的伪加密条目")
             return
         base = os.path.splitext(self._path)[0] or "repaired"
         path, _ = QFileDialog.getSaveFileName(
@@ -463,10 +463,10 @@ class ZipPanel(QWidget):
             with open(path, "wb") as f:
                 f.write(fixed)
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"保存失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
             return
         self.log.appendPlainText(f"✓ 已清除 {count} 个条目的伪加密标志:{path}")
-        QMessageBox.information(self, "MiscKit", f"伪加密修复完成:\n{path}")
+        QMessageBox.information(self, "CTFusion", f"伪加密修复完成:\n{path}")
         self.load_file(path)
 
     def _on_extract(self) -> None:
@@ -490,10 +490,10 @@ class ZipPanel(QWidget):
                         continue
                     zf.extract(info, target, pwd=password)
         except (OSError, zipfile.BadZipFile, RuntimeError) as e:
-            QMessageBox.warning(self, "MiscKit", f"解压失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"解压失败:{e}")
             return
         self.log.appendPlainText(f"✓ 已解压到:{target}")
-        QMessageBox.information(self, "MiscKit", f"解压完成:\n{target}")
+        QMessageBox.information(self, "CTFusion", f"解压完成:\n{target}")
 
     def shutdown(self) -> None:
         if self._worker is not None:

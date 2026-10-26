@@ -227,7 +227,7 @@ class FilePanel(QWidget):
         if not self.hex_viewer.is_modified:
             return True
         choice = QMessageBox.question(
-            self, "MiscKit",
+            self, "CTFusion",
             "当前文件有未保存的修改。\n是否保存后再继续?",
             QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
             QMessageBox.Save,
@@ -245,7 +245,7 @@ class FilePanel(QWidget):
             size = os.path.getsize(path)
             if size > self.MAX_READ_BYTES:
                 choice = QMessageBox.question(
-                    self, "MiscKit",
+                    self, "CTFusion",
                     f"文件大小为 {size / 1024 / 1024:.1f} MB,超过 "
                     f"{self.MAX_READ_BYTES // 1024 // 1024} MB。\n"
                     "完整载入可能占用大量内存,是否继续?",
@@ -257,7 +257,7 @@ class FilePanel(QWidget):
             with open(path, "rb") as f:
                 data = f.read()
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"读取文件失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"读取文件失败:{e}")
             return False
         self._path = path
         self._data = data
@@ -446,7 +446,7 @@ class FilePanel(QWidget):
 
     def _on_edit_blocked(self) -> None:
         QMessageBox.warning(
-            self, "MiscKit",
+            self, "CTFusion",
             "当前文件是只读的,不能修改。\n"
             "请使用「保存副本…」把修改结果保存到新文件。")
 
@@ -455,7 +455,7 @@ class FilePanel(QWidget):
             return False
         if self._read_only:
             QMessageBox.warning(
-                self, "MiscKit",
+                self, "CTFusion",
                 "当前文件是只读的,不能覆盖保存。\n请使用「另存为…」保存副本。")
             return False
         if self.hex_viewer.save_to(self._path):
@@ -557,9 +557,9 @@ class FilePanel(QWidget):
             with open(path, "wb") as f:
                 f.write(filecarve.extract(self._data, item))
         except OSError as e:
-            QMessageBox.warning(self, "MiscKit", f"保存失败:{e}")
+            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
             return
-        QMessageBox.information(self, "MiscKit", f"已提取 {item.kind}:\n{path}")
+        QMessageBox.information(self, "CTFusion", f"已提取 {item.kind}:\n{path}")
 
     def _extract_all_embedded(self) -> None:
         if not self._embedded:
@@ -576,5 +576,5 @@ class FilePanel(QWidget):
                     f.write(filecarve.extract(self._data, item))
                 count += 1
             except OSError as e:
-                QMessageBox.warning(self, "MiscKit", f"写入 {name} 失败:{e}")
-        QMessageBox.information(self, "MiscKit", f"已提取 {count} 个内嵌文件到:\n{target}")
+                QMessageBox.warning(self, "CTFusion", f"写入 {name} 失败:{e}")
+        QMessageBox.information(self, "CTFusion", f"已提取 {count} 个内嵌文件到:\n{target}")

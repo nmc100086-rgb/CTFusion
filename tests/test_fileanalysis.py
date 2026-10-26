@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core import audio, fileparse, lsb, stegsolve, zipcrack  # noqa: E402
+from core import audio, codefmt, fileparse, jwt_tool, lsb, stegsolve, zipcrack  # noqa: E402
 from core.analysis import digests, entropy, interpret_at, strings  # noqa: E402
 from core.detect import detect_encodings  # noqa: E402
 from core.filetype import identify  # noqa: E402
@@ -444,6 +444,12 @@ class ZipCrackTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             self.assertEqual(zf.read("flag.txt", pwd=b"a1"), b"hello misc")
 
+    def test_bare_question_mask_is_alphanumeric(self):
+        sets = zipcrack.parse_mask("qctf2026????")
+        self.assertEqual(len(sets), 12)
+        self.assertEqual(len(sets[-1]), 62)
+        self.assertEqual(sets[-1], zipcrack._MASK_SETS["c"])
+
     def test_dictionary_bruteforce_and_mask(self):
         data = zipcrypto_bytes("a1")
         with tempfile.TemporaryDirectory() as tmp:
@@ -465,6 +471,28 @@ class ZipCrackTests(unittest.TestCase):
             mask = zipcrack.recover_zip(zipcrack.CrackConfig(
                 path=path, mode="mask", mask="?l?d"))
             self.assertEqual(mask.password, "a1")
+
+
+class JwtAndFormatTests(unittest.TestCase):
+    def test_jwt_hs256_and_none(self):
+        token = jwt_tool.encode({"sub": "admin"}, "secret", "HS256")
+        decoded = jwt_tool.decode(token)
+        self.assertEqual(decoded.payload["sub"], "admin")
+        self.assertTrue(jwt_tool.verify(token, "secret"))
+        self.assertFalse(jwt_tool.verify(token, "wrong"))
+        none_token = jwt_tool.encode({"x": 1}, "", "none")
+        self.assertTrue(none_token.endswith("."))
+        self.assertTrue(jwt_tool.verify(none_token, ""))
+
+    def test_code_format_json_and_c(self):
+        formatted = codefmt.format_code('{"b":2,"a":[1,2]}', "JSON")
+        self.assertIn('"a"', formatted)
+        self.assertIn("\n  ", formatted)
+        c_code = "int main(){int x=1;if(x){x++;}else{x--;}return x;}"
+        result = codefmt.format_code(c_code, "C")
+        self.assertIn("int main() {", result)
+        self.assertIn("    int x=1;", result)
+        self.assertIn("} else {", result)
 
 
 class AudioTests(unittest.TestCase):
@@ -631,6 +659,23 @@ class FilePanelSmokeTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_hex_search_survives_edit(self):
+        window = MainWindow()
+        try:
+            viewer = window.file_panel.hex_viewer
+            viewer.set_data(b"hello" + b"X" * 27 + b"hello")
+            viewer.search_mode.setCurrentIndex(viewer.search_mode.findData("ascii"))
+            viewer.search_edit.setText("hello")
+            viewer._on_search()
+            self.assertEqual(len(viewer._matches), 2)
+            self.assertTrue(viewer.apply_edit(10, b"Y"))
+            self.assertEqual(viewer.search_edit.text(), "hello")
+            self.assertEqual(len(viewer._matches), 2)
+            self.assertTrue(viewer.model._highlight_bytes)
+            viewer.set_data(b"")
+        finally:
+            window.close()
+
     def test_hex_edit_byte_via_table_path(self):
         window = MainWindow()
         try:
@@ -674,6 +719,47 @@ class FilePanelSmokeTests(unittest.TestCase):
             self.assertEqual(panel.embedded_table.rowCount(), 1)
             self.assertEqual(panel.embedded_table.item(0, 1).text(), "ZIP")
             self.assertEqual(int(panel.embedded_table.item(0, 2).text()), len(zip_bytes()))
+        finally:
+            window.close()
+
+    def test_jwt_and_code_panels(self):
+        window = MainWindow()
+        try:
+            jwt = window.jwt_panel
+            jwt.secret_edit.setPlainText("secret")
+            jwt.payload_edit.setPlainText('{"role":"admin"}')
+            jwt._on_generate()
+            token = jwt.generated_edit.toPlainText()
+            self.assertEqual(token.count("."), 2)
+            jwt.token_edit.setPlainText(token)
+            jwt._on_decode()
+            self.assertIn("admin", jwt.payload_view.toPlainText())
+
+            code = window.code_panel
+            code.lang_combo.setCurrentIndex(code.lang_combo.findData("C"))
+            code.input_edit.setPlainText("int main(){return 0;}")
+            code._on_format()
+            self.assertIn("int main() {", code.output_edit.toPlainText())
+        finally:
+            window.close()
+
+    def test_multiple_file_bar_tabs(self):
+        window = MainWindow()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                paths = []
+                for name in ("a.txt", "b.txt"):
+                    path = os.path.join(tmp, name)
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(name)
+                    paths.append(path)
+                self.assertTrue(window.open_file(paths[0]))
+                self.assertTrue(window.open_file(paths[1]))
+                self.assertEqual(window.file_bar.count(), 2)
+                self.assertEqual(window._active_path, os.path.abspath(paths[1]))
+                window._close_file_tab(window.file_bar.currentIndex())
+                self.assertEqual(window.file_bar.count(), 1)
+                self.assertEqual(window._active_path, os.path.abspath(paths[0]))
         finally:
             window.close()
 
