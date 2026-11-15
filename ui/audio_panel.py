@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -28,6 +29,8 @@ from ui.highlight import install_flag_highlighter
 
 class AudioPanel(QWidget):
     """WAV 元信息与 LSB 提取。"""
+
+    openRequested = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -95,7 +98,7 @@ class AudioPanel(QWidget):
     def _choose_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "选择 WAV", "", "WAV (*.wav)")
         if path:
-            self.load_file(path)
+            self.openRequested.emit(path)
 
     def load_file(self, path: str) -> bool:
         try:
@@ -141,6 +144,20 @@ class AudioPanel(QWidget):
         self.output.clear()
         self.btn_save.setEnabled(False)
         return True
+
+    def clear(self) -> None:
+        self._path = ""
+        self._data = b""
+        self._payload = b""
+        self._info = None
+        self._extracted = b""
+        self.file_label.setText("拖入 WAV 开始分析")
+        self.info_table.setRowCount(0)
+        self.channel_combo.clear()
+        self.bit_combo.clear()
+        self.output.clear()
+        self.status.setText("WAV LSB:每个采样点取指定 bit")
+        self.btn_save.setEnabled(False)
 
     def _on_extract(self) -> None:
         if not self._data or self._info is None:

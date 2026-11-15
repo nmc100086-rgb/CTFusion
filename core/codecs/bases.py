@@ -70,6 +70,18 @@ class _StdBase(CodecBase, abstract=True):
     def _translate(self, s: str, src: str, dst: str) -> str:
         return s.translate(str.maketrans(src, dst))
 
+    @staticmethod
+    def _validate_input(s: str, table: str, *, padding: bool = False) -> str:
+        """Reject characters outside the active alphabet before translating."""
+        body = s.rstrip("=") if padding else s
+        if padding and "=" in body:
+            raise CodecError("填充符 '=' 只能出现在编码内容末尾")
+        allowed = set(table)
+        for ch in body:
+            if ch not in allowed:
+                raise CodecError(f"编码内容包含字母表之外的字符 {ch!r}")
+        return s
+
 
 class Base16Codec(_StdBase):
     name = "Base16"
@@ -86,9 +98,12 @@ class Base16Codec(_StdBase):
     def decode(self, text: str, alphabet: str = "", **p) -> str:
         table = self._check_alphabet(alphabet)
         s = _WS.sub("", text)
+        if not alphabet:
+            s = s.upper()
+        self._validate_input(s, table)
         s = self._translate(s, table, self.STD)
         try:
-            return self.to_text(base64.b16decode(s.upper()))
+            return self.to_text(base64.b16decode(s))
         except (binascii.Error, ValueError) as e:
             raise CodecError(f"不是合法的 Base16:{e}")
 
@@ -108,6 +123,9 @@ class Base32Codec(_StdBase):
     def decode(self, text: str, alphabet: str = "", **p) -> str:
         table = self._check_alphabet(alphabet)
         s = _WS.sub("", text)
+        if not alphabet:
+            s = s.upper()
+        self._validate_input(s, table, padding=True)
         s = self._translate(s, table, self.STD)
         # 很多 CTF 题会省略 padding,这里按 RFC 4648 的 8 字符分组补齐
         if "=" not in s:
@@ -221,6 +239,7 @@ class Base64Codec(_StdBase):
     def decode(self, text: str, alphabet: str = "", **p) -> str:
         table = self._check_alphabet(alphabet)
         s = _WS.sub("", text)
+        self._validate_input(s, table, padding=True)
         s = self._translate(s, table, self.STD)
         # 宽容补齐 padding
         s += "=" * (-len(s) % 4)
@@ -289,7 +308,7 @@ class Ascii85Codec(CodecBase):
             except (binascii.Error, ValueError) as e:
                 raise CodecError(f"不是合法的 Ascii85:{e}")
         for ch in s:
-            if ch not in charset:
+            if ch not in charset and ch != "z":
                 raise CodecError(f"不是合法的 Ascii85:包含非法字符 {ch!r}")
         try:
             return self.to_text(base64.a85decode(s))

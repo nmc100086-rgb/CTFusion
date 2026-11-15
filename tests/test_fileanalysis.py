@@ -22,7 +22,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core import audio, codefmt, fileparse, jwt_tool, lsb, stegsolve, zipcrack  # noqa: E402
+from core import (  # noqa: E402
+    audio,
+    bkcrack,
+    codefmt,
+    fileparse,
+    jwt_tool,
+    lsb,
+    stegsolve,
+    zipcrack,
+)
 from core.analysis import digests, entropy, interpret_at, strings  # noqa: E402
 from core.detect import detect_encodings  # noqa: E402
 from core.filetype import identify  # noqa: E402
@@ -343,6 +352,16 @@ class FileParseTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(fixed)) as zf:
             self.assertEqual(zf.read("flag.txt"), b"hello misc")
 
+    def test_prefixed_zip_inspection_and_structure(self):
+        prefixed = b"JUNK" * 123 + zip_bytes()
+        info = zipcrack.inspect(prefixed)
+        self.assertFalse(info.error)
+        self.assertEqual(len(info.entries), 1)
+        self.assertEqual(info.entries[0].name, "flag.txt")
+        nodes, end = fileparse.parse_zip(prefixed)
+        self.assertTrue(any("flag.txt" in node.title for node in nodes))
+        self.assertEqual(end, len(prefixed))
+
 
 class ImageAnalysisTests(unittest.TestCase):
     def test_png_info_and_crc_repair(self):
@@ -437,6 +456,17 @@ class ImageAnalysisTests(unittest.TestCase):
         self.assertEqual(single.text, message.decode())
         self.assertTrue(single.has_flag)
 
+    def test_lsb_uppercase_flag_is_highlighted(self):
+        message = b"FLAG{UPPER_OK} CTF{upper_ctf}"
+        bits = [(byte >> shift) & 1
+                for byte in message for shift in range(7, -1, -1)]
+        pixels = b"".join(bytes([bit, 0, 0, 255]) for bit in bits)
+        results = lsb.scan_orders(
+            pixels, 4, ("R", "G", "B", "A"), max_bytes=len(message))
+        single = next(item for item in results if item.label == "R")
+        self.assertTrue(single.has_flag)
+        self.assertIn("FLAG{UPPER_OK}", single.text)
+
 
 class ZipCrackTests(unittest.TestCase):
     def test_zipcrypto_fixture(self):
@@ -448,7 +478,82 @@ class ZipCrackTests(unittest.TestCase):
         sets = zipcrack.parse_mask("qctf2026????")
         self.assertEqual(len(sets), 12)
         self.assertEqual(len(sets[-1]), 62)
-        self.assertEqual(sets[-1], zipcrack._MASK_SETS["c"])
+        self.assertEqual(sets[-1], zipcrack.DEFAULT_WILDCARD)
+
+    def test_selected_wildcard_sets_and_all_printable(self):
+        lower = zipcrack.wildcard_charset(["l"])
+        self.assertEqual(len(lower), 26)
+        mixed = zipcrack.wildcard_charset(["u", "d"])
+        self.assertEqual(len(mixed), 36)
+        self.assertEqual(zipcrack.parse_mask("???", lower), [lower] * 3)
+        printable = zipcrack.wildcard_charset(["a", "l"])
+        self.assertEqual(len(printable), 95)
+        self.assertEqual(zipcrack._count_mask("??", printable), 95 ** 2)
+
+    def test_fixed_mask_codes_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "已移除"):
+            zipcrack.parse_mask("?l?d")
+        self.assertEqual(zipcrack.parse_mask(r"\?l"), ["?", "l"])
+
+    def test_crc32_reverse_lookup(self):
+        for content in (b"flag", b"a1", b"hello"):
+            solved = zipcrack.crc32_preimages(
+                zlib.crc32(content) & 0xFFFFFFFF, len(content))
+            self.assertIn(content, solved.candidates)
+        self.assertTrue(zipcrack.crc32_preimages(123, 0).candidates == [])
+
+    def test_crc32_bruteforce_tiny_encrypted_entry(self):
+        data = zipcrypto_bytes("pass123", content=b"flag", name="flag.bin")
+        result = zipcrack.crc32_bruteforce(data, 0)
+        self.assertFalse(result.error)
+        self.assertEqual(result.candidates, [b"flag"])
+
+    def test_crc32_bruteforce_rejects_large_archive(self):
+        result = zipcrack.crc32_bruteforce(
+            b"\x00" * (zipcrack.MAX_CRC_ARCHIVE_BYTES + 1), 0)
+        self.assertIn("安全上限", result.error)
+
+    @unittest.skipUnless(
+        bkcrack.bkcrack_info().available, "需要 bin/bkcrack.exe")
+    def test_bkcrack_known_plaintext_and_decrypt(self):
+        content = b"A" * 200
+        data = zipcrypto_bytes("pass123", content=content, name="known.bin")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kpa.zip")
+            with open(path, "wb") as f:
+                f.write(data)
+            result = bkcrack.attack(bkcrack.KpaConfig(
+                path=path, entry_index=0, plaintext=content, data=data))
+            self.assertTrue(result.success, result.error)
+            self.assertIsNotNone(result.keys)
+            output = os.path.join(tmp, "known.out")
+            plain = bkcrack.decrypt_entry(
+                path, data, 0, result.keys, output)
+            self.assertEqual(plain, content)
+            with open(output, "rb") as f:
+                self.assertEqual(f.read(), content)
+
+    def test_bkcrack_parse_keys_and_synthetic_zip(self):
+        self.assertEqual(
+            bkcrack.parse_keys("Keys: 12345678 23456789 34567890"),
+            (0x12345678, 0x23456789, 0x34567890))
+        self.assertIsNone(bkcrack.parse_keys("no keys here"))
+        data = zipcrypto_bytes("x", content=b"tiny")
+        info = zipcrack.inspect(data)
+        entry = info.entries[0]
+        ciphertext = bkcrack._extract_ciphertext(data, entry)
+        synthetic = bkcrack.build_synthetic_zip(entry, ciphertext)
+        with zipfile.ZipFile(io.BytesIO(synthetic)) as zf:
+            self.assertEqual(len(zf.infolist()), 1)
+
+    def test_zip_extraction_risk_checks(self):
+        info = zipfile.ZipInfo("huge.bin")
+        info.file_size = zipcrack.MAX_EXTRACT_SINGLE + 1
+        info.compress_size = 1
+        risks = zipcrack.extraction_risks([info])
+        self.assertTrue(any("单文件上限" in item for item in risks))
+        self.assertTrue(any("压缩比" in item for item in risks))
+        self.assertIsNone(zipcrack.safe_extract_path("C:/tmp/out", "../evil"))
 
     def test_dictionary_bruteforce_and_mask(self):
         data = zipcrypto_bytes("a1")
@@ -469,7 +574,8 @@ class ZipCrackTests(unittest.TestCase):
             self.assertEqual(brute.password, "a1")
 
             mask = zipcrack.recover_zip(zipcrack.CrackConfig(
-                path=path, mode="mask", mask="?l?d"))
+                path=path, mode="mask", mask="a?",
+                wildcard_chars="0123456789"))
             self.assertEqual(mask.password, "a1")
 
 
@@ -483,6 +589,12 @@ class JwtAndFormatTests(unittest.TestCase):
         none_token = jwt_tool.encode({"x": 1}, "", "none")
         self.assertTrue(none_token.endswith("."))
         self.assertTrue(jwt_tool.verify(none_token, ""))
+
+    def test_jwt_rejects_non_object_json(self):
+        part = base64.urlsafe_b64encode(b"[]").rstrip(b"=").decode()
+        with self.assertRaisesRegex(jwt_tool.JwtError, "JSON 对象"):
+            jwt_tool.decode(f"{part}.{part}.")
+        self.assertFalse(jwt_tool.verify(f"{part}.{part}.", ""))
 
     def test_code_format_json_and_c(self):
         formatted = codefmt.format_code('{"b":2,"a":[1,2]}', "JSON")
@@ -607,6 +719,26 @@ class FilePanelSmokeTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_large_file_analysis_runs_in_background(self):
+        window = MainWindow()
+        try:
+            panel = window.file_panel
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "large.bin")
+                with open(path, "wb") as f:
+                    f.write(b"A" * 200_000)
+                with patch.object(panel, "SYNC_ANALYSIS_BYTES", 0):
+                    self.assertTrue(panel.load_file(path))
+                    self.assertIn("后台", panel.overview.toPlainText())
+                    deadline = time.monotonic() + 5
+                    while (time.monotonic() < deadline
+                           and "SHA256" not in panel.overview.toPlainText()):
+                        self.app.processEvents()
+                        time.sleep(0.01)
+                    self.assertIn("SHA256", panel.overview.toPlainText())
+        finally:
+            window.close()
+
     def test_read_only_file_marks_viewer(self):
         window = MainWindow()
         try:
@@ -673,6 +805,36 @@ class FilePanelSmokeTests(unittest.TestCase):
             self.assertEqual(len(viewer._matches), 2)
             self.assertTrue(viewer.model._highlight_bytes)
             viewer.set_data(b"")
+        finally:
+            window.close()
+
+    def test_hex_search_caps_high_frequency_results(self):
+        window = MainWindow()
+        try:
+            viewer = window.file_panel.hex_viewer
+            viewer.set_data(b"A" * (viewer.MAX_SEARCH_MATCHES + 100))
+            viewer.search_mode.setCurrentIndex(
+                viewer.search_mode.findData("ascii"))
+            viewer.search_edit.setText("A")
+            viewer._on_search()
+            self.assertEqual(len(viewer._matches), viewer.MAX_SEARCH_MATCHES)
+            self.assertIn("上限", viewer.match_label.text())
+            self.assertLessEqual(
+                len(viewer.model._highlight_ranges),
+                viewer.MAX_SEARCH_MATCHES,
+            )
+        finally:
+            window.close()
+
+    def test_hex_copy_uses_exact_byte_range(self):
+        window = MainWindow()
+        try:
+            viewer = window.file_panel.hex_viewer
+            viewer.set_data(b"ABCDE")
+            viewer._copy_anchor = 1
+            viewer._copy_focus = 3
+            viewer._copy_selection()
+            self.assertEqual(QApplication.clipboard().text(), "42 43 44")
         finally:
             window.close()
 
@@ -760,6 +922,30 @@ class FilePanelSmokeTests(unittest.TestCase):
                 window._close_file_tab(window.file_bar.currentIndex())
                 self.assertEqual(window.file_bar.count(), 1)
                 self.assertEqual(window._active_path, os.path.abspath(paths[0]))
+                window._close_file_tab(window.file_bar.currentIndex())
+                self.assertEqual(window.file_bar.count(), 0)
+                self.assertEqual(window.file_panel._path, "")
+                self.assertEqual(window.image_panel._path, "")
+                self.assertEqual(window.audio_panel._path, "")
+                self.assertEqual(window.zip_panel._path, "")
+        finally:
+            window.close()
+
+    def test_save_as_updates_file_bar_path(self):
+        window = MainWindow()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                source = os.path.join(tmp, "source.bin")
+                saved = os.path.join(tmp, "renamed.bin")
+                with open(source, "wb") as f:
+                    f.write(b"source")
+                self.assertTrue(window.open_file(source))
+                with patch("ui.file_panel.QFileDialog.getSaveFileName",
+                           return_value=(saved, "")):
+                    window.file_panel._save_as()
+                self.assertEqual(window.file_bar.tabData(0), saved)
+                self.assertEqual(window.file_bar.tabText(0), "renamed.bin")
+                self.assertEqual(window._active_path, saved)
         finally:
             window.close()
 
@@ -834,6 +1020,59 @@ class FilePanelSmokeTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_zip_panel_handles_prefixed_archive(self):
+        window = MainWindow()
+        try:
+            panel = window.zip_panel
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "prefixed.bin")
+                with open(path, "wb") as f:
+                    f.write(b"JUNK" * 123 + zip_bytes())
+                self.assertTrue(panel.load_file(path))
+            self.assertEqual(panel.table.rowCount(), 1)
+            self.assertEqual(panel.table.item(0, 0).text(), "flag.txt")
+        finally:
+            window.close()
+
+    def test_zip_crc_panel_finds_tiny_plaintext(self):
+        window = MainWindow()
+        try:
+            panel = window.zip_panel
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "tiny.zip")
+                with open(path, "wb") as f:
+                    f.write(zipcrypto_bytes("pass123", content=b"flag",
+                                            name="flag.bin"))
+                panel.load_file(path)
+            self.assertEqual(panel.tabs.count(), 4)
+            self.assertEqual(panel.crc_panel.entry_combo.count(), 1)
+            panel.crc_panel._on_start()
+            deadline = time.monotonic() + 10
+            while (time.monotonic() < deadline
+                   and panel.crc_panel._worker is not None):
+                self.app.processEvents()
+                time.sleep(0.01)
+            self.assertEqual(panel.crc_panel._candidates, [b"flag"])
+        finally:
+            window.close()
+
+    def test_zip_wildcard_menu_is_multi_select_and_printable_is_exclusive(self):
+        window = MainWindow()
+        try:
+            panel = window.zip_panel
+            self.assertEqual(len(panel.wildcard_actions), 7)
+            panel._on_wildcard_action(panel.wildcard_actions["a"], True)
+            self.assertTrue(panel.wildcard_actions["a"].isChecked())
+            self.assertFalse(panel.wildcard_actions["l"].isChecked())
+            panel._on_wildcard_action(panel.wildcard_actions["l"], True)
+            self.assertFalse(panel.wildcard_actions["a"].isChecked())
+            self.assertTrue(panel.wildcard_actions["l"].isChecked())
+            panel._on_wildcard_action(panel.wildcard_actions["d"], True)
+            self.assertEqual(
+                set(panel._selected_wildcard_codes()), {"l", "d"})
+        finally:
+            window.close()
+
     def test_hex_edit_undo_redo_save(self):
         window = MainWindow()
         try:
@@ -852,6 +1091,7 @@ class FilePanelSmokeTests(unittest.TestCase):
                 self.assertIn("已修改", panel.file_label.text())
                 viewer.undo()
                 self.assertEqual(viewer.model.data_bytes, data)
+                self.assertFalse(viewer.is_modified)
                 viewer.redo()
                 self.assertEqual(viewer.model.data_bytes[:1], b"\x90")
                 saved = os.path.join(tmp, "saved.png")

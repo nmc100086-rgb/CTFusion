@@ -98,10 +98,23 @@ class DecoderPanelSmokeTests(unittest.TestCase):
         self.panel._on_smart()
         self.assertEqual(self.panel.result_tree.topLevelItemCount(), 1)
         item = self.panel.result_tree.topLevelItem(0)
-        self.assertEqual(item.text(0), "Base64")
+        self.assertEqual(item.text(0), "Flag")
+        self.assertEqual(item.text(1), "Base64")
         self.panel._on_hit_double_clicked(item, 0)
         self.assertEqual(self.panel.output_edit.toPlainText(), "flag{ui_smart}")
         self.assertEqual(self.panel._raw_output, "flag{ui_smart}")
+
+    def test_smart_decode_path_category_filter(self):
+        encoded = base64.b64encode(b"/home/ctf/flag.txt").decode()
+        self.panel.input_edit.setPlainText(encoded)
+        self.panel._on_smart()
+        self.assertEqual(self.panel.result_tree.topLevelItemCount(), 1)
+        item = self.panel.result_tree.topLevelItem(0)
+        self.assertEqual(item.text(0), "路径")
+        self.assertEqual(item.text(1), "Base64")
+        index = self.panel.smart_filter.findData("Flag")
+        self.panel.smart_filter.setCurrentIndex(index)
+        self.assertEqual(self.panel.result_tree.topLevelItemCount(), 0)
 
     def test_new_parameter_rows(self):
         self.select("AES")

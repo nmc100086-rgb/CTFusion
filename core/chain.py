@@ -13,6 +13,13 @@ import re
 from dataclasses import dataclass
 
 from core.codecs.base import has_flag, readability
+from core.sensitive import (
+    CATEGORY_FLAG,
+    CATEGORY_HASH,
+    CATEGORY_SECRET,
+    CATEGORY_TEXT,
+    classify_output,
+)
 
 
 # 各种编码的合法字符集(用于启发式剪枝)
@@ -24,7 +31,7 @@ _CHARSET = {
     "Base62": set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"),
     "Base64": set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="),
     "Base85": set("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"),
-    "Ascii85": set("!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstu"),
+    "Ascii85": set("!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuz"),
     "Base91": set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\""),
     "Base92": set("!#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_abcdefghijklmnopqrstuvwxyz{|}"),
     "URL 编码": set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~%"),
@@ -71,6 +78,7 @@ class ChainHit:
     path: list[str]
     output: str
     score: float
+    category: str = CATEGORY_TEXT
 
 
 # 这些古典密码对任何文本都能产出“看起来可读”的结果,需要更严格的提升阈值
@@ -146,9 +154,9 @@ def _meaningful_text(s: str) -> bool:
 
 
 def _should_record(codec_name: str, out: str, score: float, parent_score: float,
-                   parent_eng: float) -> bool:
+                   parent_eng: float, category: str = CATEGORY_TEXT) -> bool:
     """过滤掉“凯撒/Atbash 随便转一下”的噪声,保留真正的解码结果。"""
-    if has_flag(out):
+    if category != CATEGORY_TEXT:
         return True
     # 解出来是乱码/二进制时不进入智能结果
     if _printable_ratio(out) < 0.90:
@@ -183,9 +191,10 @@ def smart_decode(text: str, max_depth: int = 3, top_n: int = 30) -> list[ChainHi
 
     if not text:
         return []
-    # 输入本身已经是 flag 时直接返回,不必再套娃
-    if has_flag(text):
-        return [ChainHit(["原文"], text, readability(text))]
+    # Flags, paths, URLs, hashes, and credentials are already useful answers.
+    input_category = classify_output(text)
+    if input_category != CATEGORY_TEXT:
+        return [ChainHit(["原文"], text, readability(text), input_category)]
 
     input_score = readability(text)
     candidates = [c for c in get_all() if c.detectable and not c.need_key]
@@ -221,10 +230,18 @@ def smart_decode(text: str, max_depth: int = 3, top_n: int = 30) -> list[ChainHi
                 seen.add(out)
                 score = readability(out)
                 new_path = path + [codec.name]
-                if _should_record(codec.name, out, score, cur_score, cur_eng):
-                    hits.append(ChainHit(new_path, out, score))
-                # 命中 flag 格式就不向下扩展
-                if has_flag(out):
+
+                category = classify_output(out)
+                if category == CATEGORY_TEXT and codec.name in _HIGH_CONFIDENCE:
+                    # Base-like inputs commonly hide short passwords/tokens that
+                    # do not look like natural language after decoding.
+                    category = classify_output(out, allow_suspected_secret=True)
+
+                if _should_record(codec.name, out, score, cur_score, cur_eng,
+                                  category):
+                    hits.append(ChainHit(new_path, out, score, category))
+                # A concrete flag, path, URL, hash, or credential is terminal.
+                if category != CATEGORY_TEXT:
                     continue
                 # 古典密码通常是最外层;不再从它继续套娃,避免噪声爆炸
                 if codec.name in _WEAK_CODECS:
@@ -235,7 +252,17 @@ def smart_decode(text: str, max_depth: int = 3, top_n: int = 30) -> list[ChainHi
                 nxt.append((out, new_path, score))
         frontier = nxt
 
-    hits.sort(key=lambda h: h.score, reverse=True)
+    category_rank = {
+        CATEGORY_FLAG: 0,
+        "凭据": 1,
+        CATEGORY_SECRET: 2,
+        "路径": 3,
+        "URL": 4,
+        "哈希": 5,
+        "邮箱": 6,
+        CATEGORY_TEXT: 7,
+    }
+    hits.sort(key=lambda h: (category_rank.get(h.category, 99), -h.score))
     # 一旦找到 flag,就只展示 flag 结果,不再用中间层干扰用户
     flag_hits = [h for h in hits if has_flag(h.output)]
     if flag_hits:

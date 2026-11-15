@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from typing import ClassVar
 
+from core.sensitive import FLAG_RE as SENSITIVE_FLAG_RE
+
 
 class CodecError(Exception):
     """编解码失败。message 面向用户，直接用于弹窗提示。"""
@@ -66,8 +68,9 @@ class CodecBase:
         return data.decode("utf-8", errors="surrogateescape")
 
 
-# flag 特征使用词边界,避免把 "monkey{...}" 里的 "key{...}" 误判成 flag
-FLAG_RE = re.compile(r"\b(flag|ctf|key)\{[^}\n]{0,80}\}", re.IGNORECASE)
+# Keep flag recognition in one place so the decoder, LSB scanner, and UI
+# highlighter all treat uppercase and lowercase identically.
+FLAG_RE = SENSITIVE_FLAG_RE
 
 
 def has_flag(s: str) -> bool:

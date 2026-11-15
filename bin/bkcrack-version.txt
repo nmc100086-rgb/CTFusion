@@ -1,0 +1,7 @@
+bkcrack 1.8.1 (win64)
+Source: https://github.com/kimci86/bkcrack/releases/tag/v1.8.1
+Release asset: bkcrack-1.8.1-win64.zip
+Asset SHA-256: b35ba316170486e827dd41be2a771db06c75a309e660efc87217418149ca498a
+bkcrack.exe SHA-256: d3de2e1494c8db2a1550794cae4923956d76da9314e68198096f4b03f7f310d5
+License: zlib/png (see bkcrack-license.txt)
+Author: kimci86 and contributors

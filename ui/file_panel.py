@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import threading
+from dataclasses import dataclass, field
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -69,11 +71,116 @@ class EntropyPlot(QWidget):
                          f"{len(self._blocks)} 块 | 均值 {sum(self._blocks) / len(self._blocks):.2f} bit/byte")
 
 
+@dataclass
+class FileAnalysis:
+    generation: int
+    path: str
+    result: IdentifyResult
+    digest_rows: dict[str, str] = field(default_factory=dict)
+    overall_entropy: float = 0.0
+    entropy_blocks: list[float] = field(default_factory=list)
+    image_rows: list[tuple[str, str]] = field(default_factory=list)
+    detections: list = field(default_factory=list)
+    nodes: list[fileparse.Node] | None = None
+    parsed_supported: bool = False
+    string_rows: list[tuple[int, str]] = field(default_factory=list)
+    string_error: str = ""
+    embedded: list[filecarve.EmbeddedFile] = field(default_factory=list)
+    embedded_scanned: bool = False
+    strings_capped: bool = False
+
+
+def _shift_nodes(nodes: list[fileparse.Node], delta: int) -> None:
+    for node in nodes:
+        node.offset += delta
+        _shift_nodes(node.children, delta)
+
+
+def _build_analysis(data: bytes, result: IdentifyResult, generation: int,
+                    path: str, pattern: str, max_strings: int,
+                    cancel: threading.Event) -> FileAnalysis | None:
+    analysis = FileAnalysis(generation=generation, path=path, result=result)
+    analysis.digest_rows = digests(data)
+    if cancel.is_set():
+        return None
+    analysis.overall_entropy = entropy(data)
+    analysis.entropy_blocks = entropy_blocks(data)
+    if cancel.is_set():
+        return None
+
+    payload = data[result.prefix:]
+    analysis.image_rows = fileparse.image_info(
+        result.real_name, payload,
+        deep_analysis=len(payload) <= FilePanel.PNG_DEEP_ANALYSIS_LIMIT,
+    )
+    analysis.detections = detect_encodings(data)
+    if cancel.is_set():
+        return None
+
+    parsed = fileparse.parse(result.real_name, payload)
+    if parsed is not None:
+        analysis.nodes, _end = parsed
+        analysis.parsed_supported = True
+        if result.prefix:
+            _shift_nodes(analysis.nodes, result.prefix)
+    if cancel.is_set():
+        return None
+
+    try:
+        found = strings(
+            data, min_len=4, pattern=pattern, limit=max_strings + 1)
+        analysis.strings_capped = len(found) > max_strings
+        analysis.string_rows = found[:max_strings]
+    except Exception as exc:
+        analysis.string_error = str(exc)
+    if cancel.is_set():
+        return None
+
+    if len(data) <= 16 * 1024 * 1024:
+        analysis.embedded = filecarve.scan_embedded(data)
+        analysis.embedded_scanned = True
+    return analysis
+
+
+class AnalysisSignals(QObject):
+    finished = Signal(object)
+
+
+class AnalysisTask(QRunnable):
+    def __init__(self, data: bytes, result: IdentifyResult, generation: int,
+                 path: str, pattern: str, max_strings: int) -> None:
+        super().__init__()
+        self.data = data
+        self.result = result
+        self.generation = generation
+        self.path = path
+        self.pattern = pattern
+        self.max_strings = max_strings
+        self.cancel = threading.Event()
+        self.signals = AnalysisSignals()
+
+    def run(self) -> None:
+        analysis = _build_analysis(
+            self.data, self.result, self.generation, self.path,
+            self.pattern, self.max_strings, self.cancel,
+        )
+        if analysis is not None:
+            self.signals.finished.emit(analysis)
+
+    def stop(self) -> None:
+        self.cancel.set()
+
+
 class FilePanel(QWidget):
     """文件分析页签。"""
 
     MAX_STRINGS = 5000
     MAX_READ_BYTES = 512 * 1024 * 1024
+    SYNC_ANALYSIS_BYTES = 4 * 1024 * 1024
+    PNG_DEEP_ANALYSIS_LIMIT = 16 * 1024 * 1024
+
+    openRequested = Signal(str)
+    pathChanged = Signal(str, str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -83,6 +190,12 @@ class FilePanel(QWidget):
         self._result: IdentifyResult | None = None
         self._nodes: list[fileparse.Node] = []
         self._embedded: list[filecarve.EmbeddedFile] = []
+        self._analysis_generation = 0
+        self._analysis_tasks: set[AnalysisTask] = set()
+        self._analysis_timer = QTimer(self)
+        self._analysis_timer.setSingleShot(True)
+        self._analysis_timer.setInterval(250)
+        self._analysis_timer.timeout.connect(self._start_analysis)
         self._build_ui()
 
     # ---------------- UI ----------------
@@ -220,7 +333,7 @@ class FilePanel(QWidget):
     def _choose_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "选择文件")
         if path:
-            self.load_file(path)
+            self.openRequested.emit(path)
 
     def _confirm_discard(self) -> bool:
         """有未保存的 Hex 修改时询问,避免切换文件静默丢失。"""
@@ -269,22 +382,83 @@ class FilePanel(QWidget):
         if self._read_only:
             label += "  [只读]"
         self.file_label.setText(label)
-        self._refresh_all()
+        self._refresh_header()
+        self.hex_viewer.set_data(data, read_only=self._read_only)
+        self.hex_viewer.goto_offset(0)
+        if len(data) <= self.SYNC_ANALYSIS_BYTES:
+            self._refresh_all()
+        else:
+            self._show_analysis_pending()
+            self._schedule_analysis(0)
         return True
 
     def _refresh_all(self) -> None:
-        self._refresh_overview()
-        self._refresh_header()
-        self._refresh_structure()
+        if self._result is None:
+            return
+        self._analysis_timer.stop()
+        self._analysis_generation += 1
+        analysis = _build_analysis(
+            self._data, self._result, self._analysis_generation, self._path,
+            self.string_filter.text().strip(), self.MAX_STRINGS,
+            threading.Event(),
+        )
+        if analysis is not None:
+            self._apply_analysis(analysis)
+
+    def _show_analysis_pending(self) -> None:
+        self.overview.setPlainText(
+            "正在后台计算哈希、熵、字符串、结构、嵌套文件和编码特征…\n"
+            "文件已经可以浏览和编辑;分析完成后会自动刷新。")
+        self.structure.clear()
+        self.structure.addTopLevelItem(
+            QTreeWidgetItem(["后台分析中…", "", "", ""]))
         self._reset_embedded()
-        self._refresh_strings()
-        self.entropy_plot.set_blocks(entropy_blocks(self._data))
-        self.hex_viewer.set_data(self._data, read_only=self._read_only)
-        self.hex_viewer.goto_offset(0)
+        self.string_table.setRowCount(0)
+        self.string_table.setRowCount(1)
+        self.string_table.setItem(0, 0, QTableWidgetItem(""))
+        self.string_table.setItem(0, 1, QTableWidgetItem("后台分析中…"))
+        self.entropy_plot.set_blocks([])
+
+    def _schedule_analysis(self, delay_ms: int = 250) -> None:
+        self._analysis_generation += 1
+        self._analysis_timer.start(max(0, delay_ms))
+
+    def _start_analysis(self) -> None:
+        if not self._data or self._result is None:
+            return
+        generation = self._analysis_generation
+        task = AnalysisTask(
+            self._data, self._result, generation, self._path,
+            self.string_filter.text().strip(), self.MAX_STRINGS,
+        )
+        task.signals.finished.connect(self._on_analysis_finished)
+        self._analysis_tasks.add(task)
+        QThreadPool.globalInstance().start(task)
+
+    def _on_analysis_finished(self, analysis: FileAnalysis) -> None:
+        for task in list(self._analysis_tasks):
+            if task.generation == analysis.generation:
+                self._analysis_tasks.discard(task)
+                break
+        if (analysis.generation != self._analysis_generation
+                or analysis.path != self._path):
+            return
+        self._apply_analysis(analysis)
+
+    def _apply_analysis(self, analysis: FileAnalysis) -> None:
+        self._result = analysis.result
+        self._nodes = list(analysis.nodes or [])
+        self._embedded = analysis.embedded
+        self._refresh_overview(analysis)
+        self._refresh_header()
+        self._populate_structure(analysis)
+        self._populate_embedded(analysis.embedded, analysis.embedded_scanned)
+        self._populate_strings(analysis.string_rows, analysis.string_error)
+        self.entropy_plot.set_blocks(analysis.entropy_blocks)
 
     # ---------------- 各视图刷新 ----------------
-    def _refresh_overview(self) -> None:
-        result = self._result
+    def _refresh_overview(self, analysis: FileAnalysis) -> None:
+        result = analysis.result
         if result is None:
             return
         lines = [
@@ -296,22 +470,21 @@ class FilePanel(QWidget):
             "",
             "── 哈希 ──",
         ]
-        for name, value in digests(self._data).items():
+        for name, value in analysis.digest_rows.items():
             lines.append(f"{name:<10}: {value}")
-        lines.append(f"整体熵     : {entropy(self._data):.4f} bit/byte  (0~8)")
+        lines.append(
+            f"整体熵     : {analysis.overall_entropy:.4f} bit/byte  (0~8)")
 
-        payload = self._data[result.prefix:]
-        info_rows = fileparse.image_info(result.real_name, payload)
-        if info_rows:
+        if analysis.image_rows:
             lines.append("")
             lines.append("── 图像信息 ──")
-            lines.extend(f"{key:<10}: {value}" for key, value in info_rows)
+            lines.extend(
+                f"{key:<10}: {value}" for key, value in analysis.image_rows)
 
-        detections = detect_encodings(self._data)
-        if detections:
+        if analysis.detections:
             lines.append("")
             lines.append("── 编码特征 ──")
-            for item in detections[:10]:
+            for item in analysis.detections[:10]:
                 preview = item.decoded[:80].replace("\n", " ")
                 lines.append(
                     f"[{item.kind}] @ 0x{item.offset:X}  {item.text[:60]}"
@@ -374,28 +547,16 @@ class FilePanel(QWidget):
             self.header_table.setItem(row, 0, QTableWidgetItem(key))
             self.header_table.setItem(row, 1, QTableWidgetItem(value))
 
-    def _refresh_structure(self) -> None:
+    def _populate_structure(self, analysis: FileAnalysis) -> None:
         self.structure.clear()
-        self._nodes = []
-        if self._result is None:
-            return
-        prefix = self._result.prefix
-        parsed = fileparse.parse(self._result.real_name, self._data[prefix:])
-        if parsed is None:
-            root = QTreeWidgetItem(["该格式暂未支持结构解析", "", "", "已支持:PNG / JPG / GIF / BMP / ZIP"])
+        if not analysis.parsed_supported or analysis.nodes is None:
+            root = QTreeWidgetItem(
+                ["该格式暂未支持结构解析", "", "",
+                 "已支持:PNG / JPG / GIF / BMP / ZIP"])
             self.structure.addTopLevelItem(root)
             return
-        nodes, _end = parsed
-        if prefix:
-            self._shift_nodes(nodes, prefix)
-        self._nodes = nodes
-        for node in nodes:
+        for node in analysis.nodes:
             self._add_node(None, node)
-
-    def _shift_nodes(self, nodes: list[fileparse.Node], delta: int) -> None:
-        for node in nodes:
-            node.offset += delta
-            self._shift_nodes(node.children, delta)
 
     def _add_node(self, parent: QTreeWidgetItem | None, node: fileparse.Node) -> None:
         item = QTreeWidgetItem([node.title, f"0x{node.offset:X}", f"{node.size:,}", node.detail])
@@ -407,20 +568,15 @@ class FilePanel(QWidget):
         for child in node.children:
             self._add_node(item, child)
 
-    def _refresh_strings(self) -> None:
+    def _populate_strings(
+            self, found: list[tuple[int, str]], error: str = "") -> None:
         self.string_table.setRowCount(0)
-        if not self._data:
-            return
-        pattern = self.string_filter.text().strip()
-        try:
-            found = strings(self._data, min_len=4, pattern=pattern,
-                            limit=self.MAX_STRINGS + 1)
-        except Exception as e:  # 正则语法错误
+        if error:
             self.string_table.setRowCount(1)
             self.string_table.setItem(0, 0, QTableWidgetItem(""))
-            self.string_table.setItem(0, 1, QTableWidgetItem(f"正则错误:{e}"))
+            self.string_table.setItem(
+                0, 1, QTableWidgetItem(f"字符串扫描错误:{error}"))
             return
-        found = found[:self.MAX_STRINGS]
         self.string_table.setRowCount(len(found))
         for row, (offset, text) in enumerate(found):
             item_off = QTableWidgetItem(f"0x{offset:X}")
@@ -430,19 +586,28 @@ class FilePanel(QWidget):
             mark_item(item_text)
             self.string_table.setItem(row, 1, item_text)
 
+    def _refresh_strings(self) -> None:
+        if not self._data:
+            return
+        if len(self._data) <= self.SYNC_ANALYSIS_BYTES:
+            self._refresh_all()
+        else:
+            self._show_analysis_pending()
+            self._schedule_analysis(0)
+
     # ---------------- 编辑 / 保存 ----------------
     def _on_data_edited(self) -> None:
         if not self._path:
             return
         self._data = self.hex_viewer.data_bytes
         self._result = identify(self._data, os.path.basename(self._path))
-        self._refresh_overview()
         self._refresh_header()
-        self._refresh_structure()
-        self._reset_embedded()
-        self._refresh_strings()
-        self.entropy_plot.set_blocks(entropy_blocks(self._data))
         self.file_label.setText(f"{self._path}  ({len(self._data):,} 字节)  [已修改]")
+        if len(self._data) <= self.SYNC_ANALYSIS_BYTES:
+            self._refresh_all()
+        else:
+            self._show_analysis_pending()
+            self._schedule_analysis()
 
     def _on_edit_blocked(self) -> None:
         QMessageBox.warning(
@@ -472,6 +637,7 @@ class FilePanel(QWidget):
             return
         if not self.hex_viewer.save_to(path):
             return
+        old_path = self._path
         # 另存为之后后续 Ctrl+S 应写新文件,而不是旧路径。
         self._path = path
         self._read_only = not os.access(path, os.W_OK)
@@ -481,8 +647,13 @@ class FilePanel(QWidget):
             label += "  [只读]"
         self.file_label.setText(label)
         self.hex_viewer.set_data(self._data, read_only=self._read_only)
-        self._refresh_overview()
         self._refresh_header()
+        if len(self._data) <= self.SYNC_ANALYSIS_BYTES:
+            self._refresh_all()
+        else:
+            self._show_analysis_pending()
+            self._schedule_analysis(0)
+        self.pathChanged.emit(old_path, path)
 
     # ---------------- 联动 ----------------
     def _on_structure_click(self, item: QTreeWidgetItem, _column: int) -> None:
@@ -503,16 +674,12 @@ class FilePanel(QWidget):
             "binwalk 风格:扫描内嵌 PNG/JPEG/GIF/ZIP/PDF/ELF 等;点击扫描开始")
         self.btn_extract_embedded.setEnabled(False)
         self.btn_extract_all_embedded.setEnabled(False)
-        # 小文件自动扫描一次,大文件保持手动触发以免卡界面。
-        if self._data and len(self._data) <= 16 * 1024 * 1024:
-            self._scan_embedded()
 
-    def _scan_embedded(self) -> None:
-        if not self._data:
-            return
-        self._embedded = filecarve.scan_embedded(self._data)
-        self.embedded_table.setRowCount(len(self._embedded))
-        for row, item in enumerate(self._embedded):
+    def _populate_embedded(self, items: list[filecarve.EmbeddedFile],
+                           scanned: bool) -> None:
+        self._embedded = items
+        self.embedded_table.setRowCount(len(items))
+        for row, item in enumerate(items):
             values = [
                 f"0x{item.offset:X}",
                 item.kind,
@@ -524,17 +691,24 @@ class FilePanel(QWidget):
                 if col == 3:
                     mark_item(cell)
                 self.embedded_table.setItem(row, col, cell)
-        suffix = ""
-        if len(self._data) > 64 * 1024 * 1024:
-            suffix = "(仅扫描前 64MB)"
-        if self._embedded:
+        suffix = "(仅扫描前 64MB)" if len(self._data) > 64 * 1024 * 1024 else ""
+        if items:
             self.embedded_label.setText(
-                f"发现 {len(self._embedded)} 个内嵌文件{suffix};双击跳转,可单选或全部提取。")
-        else:
+                f"发现 {len(items)} 个内嵌文件{suffix};双击跳转,可单选或全部提取。")
+        elif scanned:
             self.embedded_label.setText(
                 f"未发现可识别的内嵌文件(已扫描常见强 magic){suffix}。")
-        self.btn_extract_embedded.setEnabled(bool(self._embedded))
-        self.btn_extract_all_embedded.setEnabled(bool(self._embedded))
+        else:
+            self.embedded_label.setText(
+                "大文件未自动扫描;点击「扫描嵌套文件」开始。")
+        self.btn_extract_embedded.setEnabled(bool(items))
+        self.btn_extract_all_embedded.setEnabled(bool(items))
+
+    def _scan_embedded(self) -> None:
+        if not self._data:
+            return
+        items = filecarve.scan_embedded(self._data)
+        self._populate_embedded(items, True)
 
     def _update_embedded_buttons(self) -> None:
         has_selection = self.embedded_table.currentRow() >= 0
@@ -578,3 +752,35 @@ class FilePanel(QWidget):
             except OSError as e:
                 QMessageBox.warning(self, "CTFusion", f"写入 {name} 失败:{e}")
         QMessageBox.information(self, "CTFusion", f"已提取 {count} 个内嵌文件到:\n{target}")
+
+    def shutdown(self, timeout_ms: int = 5_000) -> bool:
+        self._analysis_timer.stop()
+        self._analysis_generation += 1
+        for task in self._analysis_tasks:
+            task.stop()
+        done = QThreadPool.globalInstance().waitForDone(timeout_ms)
+        if done:
+            self._analysis_tasks.clear()
+        return done
+
+    def clear(self) -> None:
+        self._analysis_timer.stop()
+        self._analysis_generation += 1
+        self._path = ""
+        self._data = b""
+        self._read_only = False
+        self._result = None
+        self._nodes = []
+        self._embedded = []
+        self.file_label.setText("拖入任意文件开始分析")
+        self.overview.clear()
+        self.header_table.setRowCount(0)
+        self.structure.clear()
+        self.string_table.setRowCount(0)
+        self.embedded_table.setRowCount(0)
+        self.embedded_label.setText(
+            "binwalk 风格:扫描内嵌 PNG/JPEG/GIF/ZIP/PDF/ELF 等")
+        self.entropy_plot.set_blocks([])
+        self.hex_viewer.clear()
+        self.btn_extract_embedded.setEnabled(False)
+        self.btn_extract_all_embedded.setEnabled(False)

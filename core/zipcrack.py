@@ -1,7 +1,8 @@
-"""ZIP 辅助:结构检查与伪加密检测/修复。
+"""ZIP 辅助:结构检查、伪加密检测/修复、密码恢复与 CRC32 反查。
 
-真正的密码爆破(CRC32 反查、字典)暂不在这里实现:前者需要大字典和
-CPU 时间,后者依赖外部字典文件,放到 Kali 的 fcrackzip/john 更合适。
+bkcrack 已知明文攻击不在这里实现,而是通过 core/bkcrack.py 调用外部
+bkcrack.exe。本模块只负责 ZIP 结构、ZipCrypto 字典/暴力/掩码恢复,以及
+针对极小加密条目的 CRC32 明文反查。
 """
 
 from __future__ import annotations
@@ -21,16 +22,27 @@ from core import fileparse
 _LOCAL = b"PK\x03\x04"
 _CENTRAL = b"PK\x01\x02"
 
-_MASK_SETS = {
-    "l": "abcdefghijklmnopqrstuvwxyz",
-    "u": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    "d": "0123456789",
-    "h": "0123456789abcdef",
-    "H": "0123456789ABCDEF",
-    "s": "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
-    "a": "".join(chr(i) for i in range(32, 127)),
-    "c": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-}
+DEFAULT_WILDCARD = (
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+)
+
+WILDCARD_OPTIONS: tuple[tuple[str, str, str], ...] = (
+    ("l", "小写字母", "abcdefghijklmnopqrstuvwxyz"),
+    ("u", "大写字母", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+    ("d", "数字", "0123456789"),
+    ("H", "大写 HEX", "0123456789ABCDEF"),
+    ("h", "小写 HEX", "0123456789abcdef"),
+    ("s", "特殊符号", "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"),
+    ("a", "所有可打印字符", "".join(chr(i) for i in range(32, 127))),
+)
+_WILDCARD_CHARS = {code: chars for code, _label, chars in WILDCARD_OPTIONS}
+
+MAX_EXTRACT_ENTRIES = 10_000
+MAX_EXTRACT_SINGLE = 512 * 1024 * 1024
+MAX_EXTRACT_TOTAL = 2 * 1024 * 1024 * 1024
+MAX_EXTRACT_RATIO = 1000
+HARD_EXTRACT_SINGLE = 2 * 1024 * 1024 * 1024
+HARD_EXTRACT_TOTAL = 8 * 1024 * 1024 * 1024
 
 
 @dataclass
@@ -123,7 +135,8 @@ def inspect(data: bytes) -> ZipInspect:
             result.comment = raw.decode("utf-8")
         except UnicodeDecodeError:
             result.comment = raw.decode("gb18030", "replace")
-    pos = cd_off
+    base = fileparse.zip_data_base(data, eocd)
+    pos = base + cd_off
     for _ in range(min(total, 100000)):
         if pos + 46 > len(data) or data[pos:pos + 4] != _CENTRAL:
             break
@@ -139,7 +152,8 @@ def inspect(data: bytes) -> ZipInspect:
         name = _decode_name(data[pos + 46:pos + 46 + nlen], flags)
         extra_off = pos + 46 + nlen
         extra = data[extra_off:extra_off + elen]
-        entry = ZipEntry(name, flags, method, crc, csize, usize, lho, pos)
+        entry = ZipEntry(name, flags, method, crc, csize, usize,
+                         base + lho, pos)
         entry.aes = bool(flags & 1) and _has_aes_extra(extra)
         if lho + 30 <= len(data) and data[lho:lho + 4] == _LOCAL:
             entry.local_flags = int.from_bytes(data[lho + 6:lho + 8], "little")
@@ -170,6 +184,273 @@ def repair_pseudo_encryption(data: bytes) -> tuple[bytes, int]:
     return bytes(out), count
 
 
+def extraction_risks(entries: list[zipfile.ZipInfo]) -> list[str]:
+    """Return resource-limit warnings for an archive's declared contents."""
+    risks: list[str] = []
+    if len(entries) > MAX_EXTRACT_ENTRIES:
+        risks.append(
+            f"条目数 {len(entries):,} 超过安全上限 {MAX_EXTRACT_ENTRIES:,}")
+    total = sum(max(0, entry.file_size) for entry in entries)
+    if total > MAX_EXTRACT_TOTAL:
+        risks.append(
+            f"解压总量 {total / 1024 / 1024:.1f} MB 超过 "
+            f"{MAX_EXTRACT_TOTAL // 1024 // 1024} MB")
+    for entry in entries:
+        if entry.file_size > MAX_EXTRACT_SINGLE:
+            risks.append(
+                f"条目 {entry.filename!r} 解压后 "
+                f"{entry.file_size / 1024 / 1024:.1f} MB,超过单文件上限")
+            break
+    for entry in entries:
+        if entry.compress_size and entry.file_size >= 1024 * 1024:
+            ratio = entry.file_size / entry.compress_size
+            if ratio > MAX_EXTRACT_RATIO:
+                risks.append(
+                    f"条目 {entry.filename!r} 压缩比 {ratio:.0f}:1,"
+                    f"超过 {MAX_EXTRACT_RATIO}:1")
+                break
+    return risks
+
+
+def safe_extract_path(root: str, name: str) -> str | None:
+    """Resolve an archive member only when it stays under root."""
+    root_path = os.path.realpath(root)
+    destination = os.path.realpath(os.path.join(root_path, name))
+    try:
+        if os.path.commonpath([root_path, destination]) == root_path:
+            return destination
+    except ValueError:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------- CRC32 反查
+
+MAX_CRC_ARCHIVE_BYTES = 1024 * 1024
+MAX_CRC_ENTRIES = 256
+MAX_CRC_ENTRY_BYTES = 6
+MAX_CRC_SOLUTIONS = 65_536
+
+
+@dataclass
+class CrcSolve:
+    candidates: list[bytes] = field(default_factory=list)
+    total: int = 0
+    truncated: bool = False
+    cancelled: bool = False
+
+
+@dataclass
+class CrcBruteResult:
+    candidates: list[bytes] = field(default_factory=list)
+    tried: int = 0
+    elapsed: float = 0.0
+    cancelled: bool = False
+    error: str = ""
+    entry_name: str = ""
+    entry_index: int = -1
+    size: int = 0
+    method: int = 0
+    compressed_size: int = 0
+
+
+def _solve_crc_linear(target: int, length: int) -> tuple[int, list[int]] | None:
+    """Solve CRC32(data) == target for a fixed byte length over GF(2)."""
+    zero = b"\x00" * length
+    base = zlib.crc32(zero) & 0xFFFFFFFF
+    rhs = (target ^ base) & 0xFFFFFFFF
+    nvars = length * 8
+    columns: list[int] = []
+    for index in range(length):
+        for bit in range(8):
+            buf = bytearray(zero)
+            buf[index] = 1 << bit
+            columns.append((zlib.crc32(bytes(buf)) & 0xFFFFFFFF) ^ base)
+
+    rows: list[list[int]] = []
+    for out_bit in range(32):
+        mask = 0
+        for var, column in enumerate(columns):
+            if (column >> out_bit) & 1:
+                mask |= 1 << var
+        rows.append([mask, (rhs >> out_bit) & 1])
+
+    pivots: dict[int, int] = {}
+    rank = 0
+    for col in range(nvars):
+        pivot = next(
+            (row for row in range(rank, 32) if (rows[row][0] >> col) & 1),
+            None,
+        )
+        if pivot is None:
+            continue
+        rows[rank], rows[pivot] = rows[pivot], rows[rank]
+        for row in range(32):
+            if row != rank and (rows[row][0] >> col) & 1:
+                rows[row][0] ^= rows[rank][0]
+                rows[row][1] ^= rows[rank][1]
+        pivots[col] = rank
+        rank += 1
+
+    for row in range(rank, 32):
+        if rows[row][0] == 0 and rows[row][1]:
+            return None
+
+    particular = 0
+    for col, row in pivots.items():
+        if rows[row][1]:
+            particular |= 1 << col
+
+    free_columns = [col for col in range(nvars) if col not in pivots]
+    basis: list[int] = []
+    for free in free_columns:
+        vector = 1 << free
+        for col, row in pivots.items():
+            if (rows[row][0] >> free) & 1:
+                vector |= 1 << col
+        basis.append(vector)
+    return particular, basis
+
+
+def crc32_preimages(target: int, length: int,
+                    cancel: threading.Event | None = None,
+                    progress: Callable[[int, int], None] | None = None
+                    ) -> CrcSolve:
+    """Return all byte strings of ``length`` bytes whose CRC32 equals target."""
+    result = CrcSolve()
+    if length < 0 or length > MAX_CRC_ENTRY_BYTES:
+        result.truncated = True
+        return result
+    if length == 0:
+        result.total = 1
+        if target == 0:
+            result.candidates.append(b"")
+        return result
+
+    solved = _solve_crc_linear(target & 0xFFFFFFFF, length)
+    if solved is None:
+        return result
+    particular, basis = solved
+    total = 1 << len(basis)
+    result.total = total
+    if total > MAX_CRC_SOLUTIONS:
+        result.truncated = True
+        return result
+
+    vector = particular
+    for index in range(total):
+        if cancel is not None and cancel.is_set():
+            result.cancelled = True
+            break
+        if index:
+            # Gray code order: flip exactly one basis vector per step.
+            bit = (index & -index).bit_length() - 1
+            vector ^= basis[bit]
+        data = bytearray(length)
+        for var in range(length * 8):
+            if (vector >> var) & 1:
+                data[var >> 3] |= 1 << (var & 7)
+        candidate = bytes(data)
+        if (zlib.crc32(candidate) & 0xFFFFFFFF) == (target & 0xFFFFFFFF):
+            result.candidates.append(candidate)
+        if progress is not None and (index + 1 == total or (index + 1) % 4096 == 0):
+            progress(index + 1, total)
+    return result
+
+
+def crc32_bruteforce(data: bytes, entry_index: int = 0,
+                     cancel: threading.Event | None = None,
+                     progress: Callable[[int, int], None] | None = None
+                     ) -> CrcBruteResult:
+    """Recover a tiny ZipCrypto entry's plaintext from its stored CRC32.
+
+    Only very small archives and entries are accepted; the function never
+    writes or executes data.  It is meant for tiny CTF files (typically 4
+    bytes), where the 32-bit CRC is enough to determine the plaintext.
+    """
+    started = time.monotonic()
+    result = CrcBruteResult(entry_index=entry_index)
+    if not data:
+        result.error = "ZIP 数据为空"
+        return result
+    if len(data) > MAX_CRC_ARCHIVE_BYTES:
+        result.error = (
+            f"ZIP 文件 {len(data):,} 字节,超过 CRC 爆破安全上限 "
+            f"{MAX_CRC_ARCHIVE_BYTES:,} 字节;该功能只用于极小的 ZIP")
+        return result
+    info = inspect(data)
+    if info.error:
+        result.error = info.error
+        return result
+    if len(info.entries) > MAX_CRC_ENTRIES:
+        result.error = (
+            f"ZIP 条目数 {len(info.entries):,} 超过安全上限 "
+            f"{MAX_CRC_ENTRIES:,}")
+        return result
+    if entry_index < 0 or entry_index >= len(info.entries):
+        result.error = "请选择要爆破的加密条目"
+        return result
+    entry = info.entries[entry_index]
+    result.entry_name = entry.name
+    result.size = entry.size
+    result.method = entry.method
+    result.compressed_size = entry.compressed_size
+
+    if entry.aes:
+        result.error = "该条目使用 AES/WinZip 加密,CRC32 反查不适用"
+        return result
+    if entry.flags & 0x40:
+        result.error = "该条目使用 Strong Encryption(bit 6),CRC32 反查不适用"
+        return result
+    if not (entry.flags & 1):
+        result.error = "该条目未加密,无需 CRC 爆破"
+        return result
+    if entry.pseudo:
+        result.error = "该条目疑似伪加密,请先修复伪加密"
+        return result
+    if entry.size > MAX_CRC_ENTRY_BYTES:
+        result.error = (
+            f"条目明文 {entry.size:,} 字节,超过 CRC 爆破上限 "
+            f"{MAX_CRC_ENTRY_BYTES} 字节;更大的文件请使用已知明文攻击")
+        return result
+    if entry.method not in (0, 8):
+        result.error = f"暂不支持压缩方法 {entry.method};仅支持存储/Deflate"
+        return result
+    if entry.compressed_size < 12:
+        result.error = "加密数据长度异常,缺少 ZipCrypto 12 字节头"
+        return result
+    if entry.local_flags is None or not (entry.local_flags & 1):
+        result.error = "本地头未标记加密,无法确认 ZipCrypto 条目"
+        return result
+    local = entry.local_offset
+    if (local < 0 or local + 30 > len(data)
+            or data[local:local + 4] != _LOCAL):
+        result.error = "本地文件头越界或损坏"
+        return result
+    name_len = int.from_bytes(data[local + 26:local + 28], "little")
+    extra_len = int.from_bytes(data[local + 28:local + 30], "little")
+    start = local + 30 + name_len + extra_len
+    if start + entry.compressed_size > len(data):
+        result.error = "加密数据越过文件末尾"
+        return result
+    if entry.method == 0 and entry.compressed_size != entry.size + 12:
+        result.error = "存储条目的加密后大小与明文大小不一致"
+        return result
+
+    solved = crc32_preimages(entry.crc, entry.size, cancel=cancel,
+                             progress=progress)
+    result.tried = solved.total
+    result.cancelled = solved.cancelled
+    if solved.truncated:
+        result.error = (
+            f"候选空间 {solved.total:,} 超过安全上限 "
+            f"{MAX_CRC_SOLUTIONS:,}")
+        return result
+    result.candidates = solved.candidates
+    result.elapsed = time.monotonic() - started
+    return result
+
+
 # ---------------------------------------------------------------- 密码恢复
 
 @dataclass
@@ -180,7 +461,8 @@ class CrackConfig:
     charset: str = "abcdefghijklmnopqrstuvwxyz0123456789"
     min_length: int = 1
     max_length: int = 6
-    mask: str = "?l?l?l?l"
+    mask: str = "????"
+    wildcard_chars: str = ""
     encoding: str = "utf-8"        # utf-8 / gbk / auto
     max_candidates: int = 0
 
@@ -198,12 +480,23 @@ class CrackResult:
     path: str = ""
 
 
-def parse_mask(mask: str) -> list[str]:
+def wildcard_charset(codes: list[str] | tuple[str, ...] | set[str]) -> str:
+    """Return the union represented by selected wildcard options."""
+    if "a" in codes:
+        return _WILDCARD_CHARS["a"]
+    chars = "".join(_WILDCARD_CHARS[code] for code in codes
+                    if code in _WILDCARD_CHARS)
+    return "".join(dict.fromkeys(chars))
+
+
+_REMOVED_MASK_CODES = frozenset("ludhsacH")
+
+
+def parse_mask(mask: str, wildcard_chars: str = "") -> list[str]:
     """解析掩码,返回每个位置的字符集。
 
-    支持 ?l ?u ?d ?h ?H ?s ?a ?c;为了兼容用户习惯,
-    单独的 ? (后面不是已知代码)按字母+数字 ?c 处理。
-    字面问号请写 \\?。
+    每个裸 ``?`` 都是通配符,字符集由界面上的多选下拉菜单决定;不再支持
+    ``?l`` / ``?d`` 这类固定写法。``\\?`` 表示字面问号,其他字符按字面处理。
     """
     sets: list[str] = []
     pos = 0
@@ -214,33 +507,28 @@ def parse_mask(mask: str) -> list[str]:
             pos += 2
             continue
         if ch == "?":
-            if pos + 1 >= len(mask):
-                sets.append(_MASK_SETS["c"])
-                break
-            code = mask[pos + 1]
-            if code in _MASK_SETS:
-                sets.append(_MASK_SETS[code])
-                pos += 2
-            else:
-                # qctf2026???? 这类写法:每个 ? 当字母+数字通配。
-                sets.append(_MASK_SETS["c"])
-                pos += 1
+            if pos + 1 < len(mask) and mask[pos + 1] in _REMOVED_MASK_CODES:
+                raise ValueError(
+                    "掩码固定写法 ?l/?u/?d/?h/?H/?s/?a/?c 已移除;"
+                    "请只写裸 ? 并在下拉菜单中多选字符集,字面问号用 \\?")
+            sets.append(wildcard_chars or DEFAULT_WILDCARD)
+            pos += 1
             continue
         sets.append(ch)
         pos += 1
     return sets
 
 
-def _iter_mask(mask: str) -> Iterator[str]:
-    sets = parse_mask(mask)
+def _iter_mask(mask: str, wildcard_chars: str = "") -> Iterator[str]:
+    sets = parse_mask(mask, wildcard_chars)
     if not sets or any(not chars for chars in sets):
         return
     for values in itertools.product(*sets):
         yield "".join(values)
 
 
-def _count_mask(mask: str) -> int:
-    sets = parse_mask(mask)
+def _count_mask(mask: str, wildcard_chars: str = "") -> int:
+    sets = parse_mask(mask, wildcard_chars)
     total = 1
     for chars in sets:
         total *= max(1, len(chars))
@@ -418,12 +706,12 @@ class ZipCracker:
             if cfg.mode == "dictionary":
                 return _count_wordlist(cfg.wordlist, cfg.encoding)
             if cfg.mode == "mask":
-                return _count_mask(cfg.mask)
+                return _count_mask(cfg.mask, cfg.wildcard_chars)
             if cfg.mode == "brute":
                 chars = len(cfg.charset)
                 return sum(chars ** length
                            for length in range(cfg.min_length, cfg.max_length + 1))
-        except (OSError, UnicodeError):
+        except (OSError, UnicodeError, ValueError):
             return 0
         return 0
 
@@ -434,7 +722,7 @@ class ZipCracker:
                 raise ValueError("请选择字典文件")
             yield from _iter_wordlist(cfg.wordlist, cfg.encoding)
         elif cfg.mode == "mask":
-            yield from _iter_mask(cfg.mask)
+            yield from _iter_mask(cfg.mask, cfg.wildcard_chars)
         elif cfg.mode == "brute":
             if not cfg.charset:
                 raise ValueError("暴力破解字符集不能为空")

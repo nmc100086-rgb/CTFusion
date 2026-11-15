@@ -48,6 +48,10 @@ class CodecRoundTripTests(unittest.TestCase):
         c = codec("Ascii85")
         self.assertEqual(c.decode("<~87cURD]i,\"Ebo80~>"), "Hello World!")
         self.assertEqual(c.decode("<~z~>"), "\x00\x00\x00\x00")
+        zeros = "\x00" * 8
+        encoded = c.encode(zeros)
+        self.assertEqual(encoded, "zz")
+        self.assertEqual(c.decode(encoded), zeros)
 
     def test_base32_unpadded(self):
         self.assertEqual(codec("Base32").decode("JBSWY3DPFQQFO33SNRSCC"), "Hello, World!")
@@ -57,6 +61,20 @@ class CodecRoundTripTests(unittest.TestCase):
         alphabet = "abcdefghijklmnopqrstuvwxyz234567"
         encoded = c.encode("Hello, World!", alphabet=alphabet)
         self.assertEqual(c.decode(encoded.rstrip("="), alphabet=alphabet), "Hello, World!")
+
+    def test_custom_alphabet_rejects_foreign_standard_chars(self):
+        cases = (
+            ("Base16", "0123456789ABCDEF", "AA"),
+            ("Base32", "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", "AAAA"),
+            ("Base64",
+             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+             "AAAA"),
+        )
+        for name, standard, payload in cases:
+            with self.subTest(name=name):
+                alphabet = standard.replace("A", "!", 1)
+                with self.assertRaisesRegex(Exception, "字母表之外|非法"):
+                    codec(name).decode(payload, alphabet=alphabet)
 
     def test_brainfuck_ook_non_ascii(self):
         for name in ("Brainfuck", "Ook!"):
@@ -410,6 +428,21 @@ class SmartDecodeTests(unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0].path, ["原文"])
 
+    def test_non_flag_sensitive_outputs_are_kept(self):
+        cases = {
+            "/home/ctf/flag.txt": "路径",
+            "password=Sup3rSecret!": "凭据",
+            "https://example.com/challenge": "URL",
+            "d41d8cd98f00b204e9800998ecf8427e": "哈希",
+        }
+        for output, category in cases.items():
+            with self.subTest(output=output):
+                hits = smart_decode(
+                    base64.b64encode(output.encode()).decode())
+                self.assertTrue(hits)
+                self.assertEqual(hits[0].output, output)
+                self.assertEqual(hits[0].category, category)
+
     def test_common_chains_find_flag(self):
         flag = "flag{smart_decode_works}"
         cases = {
@@ -441,12 +474,18 @@ class SmartDecodeTests(unittest.TestCase):
 class JsfuckTests(unittest.TestCase):
     def test_small_jsfuck(self):
         c = codec("JSFuck")
-        self.assertEqual(c.decode("(![]+[])[+[]]+(![]+[])[+!+[]]"), "fa")
+        snippet = "(![]+[])[+[]]+(![]+[])[+!+[]]"
+        with self.assertRaisesRegex(Exception, "确认风险"):
+            c.decode(snippet)
+        self.assertEqual(c.decode(snippet, allow_execution="1"), "fa")
 
     def test_large_jsfuck_uses_stdin(self):
         # Windows 命令行上限约 32K;通过 stdin 传递后 35K 的代码也能执行
         code = "+".join(["![]+[]"] * 5000)  # 34999 字符,输出 25000 个 "false"
-        self.assertEqual(len(codec("JSFuck").decode(code)), 25000)
+        self.assertEqual(
+            len(codec("JSFuck").decode(code, allow_execution="1")),
+            25000,
+        )
 
 
 if __name__ == "__main__":

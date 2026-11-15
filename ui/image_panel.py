@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QBuffer, QIODevice, Qt
+from PySide6.QtCore import QBuffer, QIODevice, Qt, Signal
 from PySide6.QtGui import QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -51,6 +51,10 @@ def _scaled_pixmap(image: QImage, label: QLabel) -> QPixmap:
 
 class ImagePanel(QWidget):
     """图片隐写页签。"""
+
+    openRequested = Signal(str)
+    PNG_DEEP_ANALYSIS_LIMIT = 16 * 1024 * 1024
+    GIF_CACHE_LIMIT = 256 * 1024 * 1024
 
     def __init__(self) -> None:
         super().__init__()
@@ -560,15 +564,15 @@ class ImagePanel(QWidget):
             self, "选择图片",
             "", "图片 (*.png *.jpg *.jpeg *.gif *.bmp *.webp *.tif *.tiff)")
         if path:
-            self.load_file(path)
+            self.openRequested.emit(path)
 
-    def load_file(self, path: str) -> None:
+    def load_file(self, path: str) -> bool:
         try:
             with open(path, "rb") as f:
                 data = f.read()
         except OSError as e:
             QMessageBox.warning(self, "CTFusion", f"读取文件失败:{e}")
-            return
+            return False
         result = identify(data, os.path.basename(path))
         self._path = path
         self._data = data
@@ -597,6 +601,7 @@ class ImagePanel(QWidget):
                 "提示:JPEG 是有损压缩,解码后的像素 LSB 不能可靠保留隐藏数据;\n"
                 "以下提取结果仅供排查,建议优先使用 PNG/BMP 原图。")
         self._extracted = b""
+        return True
 
     def _load_image(self) -> None:
         # 先用 QImageReader 检查尺寸,避免解码超大像素图时直接耗尽内存。
@@ -743,7 +748,10 @@ class ImagePanel(QWidget):
 
     # ---------------- 基本信息 ----------------
     def _refresh_info(self) -> None:
-        rows = fileparse.image_info(self._kind, self._payload)
+        rows = fileparse.image_info(
+            self._kind, self._payload,
+            deep_analysis=len(self._payload) <= self.PNG_DEEP_ANALYSIS_LIMIT,
+        )
         if self._width:
             rows.append(("像素总数", f"{self._width * self._height:,}"))
         if not rows:
@@ -756,10 +764,14 @@ class ImagePanel(QWidget):
         if not self._pixels:
             return
         channels = self._selected_channels()
-        channel = channels[0]
         bit = self.lsb_bit.currentIndex()
-        plane = lsb.bit_plane(self._pixels, self._channels, channel, bit)
-        image = QImage(plane, self._width, self._height,
+        plane = bytearray(self._width * self._height)
+        for channel in channels:
+            channel_plane = lsb.bit_plane(
+                self._pixels, self._channels, channel, bit)
+            for index, value in enumerate(channel_plane):
+                plane[index] |= value
+        image = QImage(bytes(plane), self._width, self._height,
                        self._width, QImage.Format_Grayscale8).copy()
         self.lsb_preview.setPixmap(_scaled_pixmap(image, self.lsb_preview))
 
@@ -831,7 +843,11 @@ class ImagePanel(QWidget):
             self._log("✓ 所有 chunk 的 CRC 校验通过")
         if info.truncated:
             self._log("⚠ 文件存在截断的 chunk,部分修复可能失败")
-        candidates = fileparse.png_size_candidates(self._payload) if is_png else []
+        candidates = (
+            fileparse.png_size_candidates(self._payload)
+            if is_png and len(self._payload) <= self.PNG_DEEP_ANALYSIS_LIMIT
+            else []
+        )
         actual = candidates[0] if candidates else None
         if actual:
             if actual != (info.width, info.height):
@@ -843,6 +859,10 @@ class ImagePanel(QWidget):
                 preview = "、".join(f"{w}x{h}" for w, h in candidates[:8])
                 self._log(f"  其他候选:{preview}"
                           + ("…" if len(candidates) > 8 else ""))
+        elif is_png and len(self._payload) > self.PNG_DEEP_ANALYSIS_LIMIT:
+            self._log(
+                "文件较大,已跳过自动 IDAT 尺寸推算;"
+                "需要时可点击「按 IDAT 自动推算宽高…」")
 
     def _log(self, text: str) -> None:
         self.repair_log.appendPlainText(text)
@@ -953,7 +973,19 @@ class ImagePanel(QWidget):
         count = reader.imageCount()
         # Qt 的 GIF 插件不支持随机 jumpToImage,但可以顺序 read。
         # 一次性读入帧缓存,避免切回第 1 帧时读到下一帧。
-        limit = min(count if count > 0 else _GIF_MAX_FRAMES, _GIF_MAX_FRAMES)
+        guessed = reader.size()
+        frame_bytes = 0
+        if guessed.isValid():
+            frame_bytes = max(1, guessed.width() * guessed.height() * 4)
+        budget_frames = (
+            max(1, self.GIF_CACHE_LIMIT // frame_bytes)
+            if frame_bytes else _GIF_MAX_FRAMES
+        )
+        limit = min(
+            count if count > 0 else _GIF_MAX_FRAMES,
+            _GIF_MAX_FRAMES,
+            budget_frames,
+        )
         for _ in range(limit):
             image = reader.read()
             if image.isNull():
@@ -977,6 +1009,51 @@ class ImagePanel(QWidget):
         self.frame_combo.blockSignals(False)
         self.lsb_frame.blockSignals(False)
         self._show_frame(0)
+
+    def clear(self) -> None:
+        self._path = ""
+        self._data = b""
+        self._payload = b""
+        self._prefix = 0
+        self._kind = ""
+        self._image = None
+        self._pixels = b""
+        self._channels = 0
+        self._channel_names = ()
+        self._width = self._height = 0
+        self._extracted = b""
+        self._text_chunks = []
+        self._gif_frames = []
+        self._image_buffer = None
+        self.file_label.setText("拖入图片开始分析")
+        self.preview.setPixmap(QPixmap())
+        self.preview.setText("图片预览")
+        self.info_table.setRowCount(0)
+        self.chunk_table.setRowCount(0)
+        self.crc_table.setRowCount(0)
+        self.exif_table.setRowCount(0)
+        self.frame_combo.clear()
+        self.lsb_frame.clear()
+        self.frame_combo.setEnabled(False)
+        self.lsb_frame.setEnabled(False)
+        self.lsb_output.clear()
+        self.row_scan_output.clear()
+        self.repair_log.clear()
+        self.tool_log.clear()
+        self.lsb_capacity.setText("单通道最低位容量:—")
+        self.chunk_hint.setText("仅 PNG 支持 Chunk 列表与文本块提取")
+        self.repair_hint.setText("仅 PNG 支持 CRC 与宽高校验/修复")
+        self.row_scan_status.setText(
+            "遍历 R/G/B/A 通道顺序,提取 LSB 文本;flag 行会排在最前并高亮。")
+        self.lsb_preview.setPixmap(QPixmap())
+        self.lsb_preview.setText("位平面预览")
+        self.tool_preview.setPixmap(QPixmap())
+        self.tool_preview.setText("通道 / XOR / 差分结果预览")
+        self.frame_preview.setPixmap(QPixmap())
+        self.frame_preview.setText("载入 GIF 后可逐帧查看")
+        self.btn_bitplane.setEnabled(False)
+        self.btn_extract.setEnabled(False)
+        self.stegsolve.set_image(None)
 
     def _show_frame(self, index: int) -> None:
         if index < 0 or index >= len(self._gif_frames):

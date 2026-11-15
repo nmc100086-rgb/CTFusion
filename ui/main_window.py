@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QMainWindow,
+    QMessageBox,
     QTabBar,
     QTabWidget,
     QToolButton,
@@ -32,7 +33,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("CTFusion - CTF Toolkit")
+        self.setWindowTitle("CTFusion v2.2 - CTF Toolkit")
         self.resize(1200, 780)
         self.setAcceptDrops(True)
         self._active_path = ""
@@ -45,6 +46,12 @@ class MainWindow(QMainWindow):
         self.zip_panel = ZipPanel()
         self.jwt_panel = JwtPanel()
         self.code_panel = CodePanel()
+
+        for panel in (self.file_panel, self.image_panel,
+                      self.audio_panel, self.zip_panel):
+            panel.openRequested.connect(self.open_file)
+        self.file_panel.pathChanged.connect(self._on_panel_path_changed)
+        self.zip_panel.pathChanged.connect(self._on_panel_path_changed)
 
         self.tabs.addTab(self.decoder_panel, "编码解码")
         self.tabs.addTab(self.file_panel, "文件分析")
@@ -138,6 +145,9 @@ class MainWindow(QMainWindow):
         if is_wav:
             if not self.file_panel.load_file(path):
                 return False
+            if not self.zip_panel.clear():
+                return False
+            self.image_panel.clear()
             loaded_audio = self.audio_panel.load_file(path)
             self.tabs.setCurrentWidget(
                 self.audio_panel if loaded_audio else self.file_panel)
@@ -145,16 +155,29 @@ class MainWindow(QMainWindow):
         if is_zip:
             if not self.file_panel.load_file(path):
                 return False
-            self.zip_panel.load_file(path)
+            self.image_panel.clear()
+            self.audio_panel.clear()
+            if not self.zip_panel.clear():
+                return False
+            if not self.zip_panel.load_file(path):
+                return False
             self.tabs.setCurrentWidget(self.zip_panel)
             return True
         if is_image:
             if not self.file_panel.load_file(path):
                 return False
-            self.image_panel.load_file(path)
+            self.audio_panel.clear()
+            if not self.zip_panel.clear():
+                return False
+            if not self.image_panel.load_file(path):
+                return False
             self.tabs.setCurrentWidget(self.image_panel)
             return True
         if not self.file_panel.load_file(path):
+            return False
+        self.image_panel.clear()
+        self.audio_panel.clear()
+        if not self.zip_panel.clear():
             return False
         self.tabs.setCurrentWidget(self.file_panel)
         return True
@@ -222,11 +245,32 @@ class MainWindow(QMainWindow):
                 if not self._active_path:
                     self._on_file_tab_changed(new_index)
             else:
-                self.file_panel.hex_viewer.clear()
+                self.file_panel.clear()
+                self.image_panel.clear()
+                self.audio_panel.clear()
+                self.zip_panel.clear()
+
+    def _on_panel_path_changed(self, old_path: str, new_path: str) -> None:
+        if not new_path:
+            return
+        for index in range(self.file_bar.count()):
+            tab_path = self.file_bar.tabData(index)
+            if (tab_path and old_path
+                    and os.path.normcase(tab_path) == os.path.normcase(old_path)):
+                self.file_bar.setTabText(index, os.path.basename(new_path))
+                self.file_bar.setTabData(index, new_path)
+                self.file_bar.setTabToolTip(index, new_path)
+                self._active_path = new_path
+                return
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if not self.file_panel._confirm_discard():
             event.ignore()
             return
-        self.zip_panel.shutdown()
+        if not self.file_panel.shutdown() or not self.zip_panel.shutdown():
+            QMessageBox.warning(
+                self, "CTFusion",
+                "后台任务仍在停止中,请稍后再关闭程序。")
+            event.ignore()
+            return
         super().closeEvent(event)

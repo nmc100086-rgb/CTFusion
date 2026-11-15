@@ -304,6 +304,32 @@ def _zip64_values(data: bytes, eocd: int) -> tuple[int, int, int] | None:
     return total, cd_size, cd_off
 
 
+def zip_data_base(data: bytes, eocd: int | None = None) -> int:
+    """Return the absolute start of a ZIP inside possible leading junk data."""
+    if eocd is None:
+        eocd = _find_zip_eocd(data)
+    if eocd < 0 or eocd + 22 > len(data):
+        return 0
+    total = _u16le(data, eocd + 10)
+    cd_size = _u32le(data, eocd + 12)
+    cd_off = _u32le(data, eocd + 16)
+    directory_end = eocd
+    if total == 0xFFFF or cd_size == 0xFFFFFFFF or cd_off == 0xFFFFFFFF:
+        values = _zip64_values(data, eocd)
+        if values is not None:
+            total, cd_size, cd_off = values
+            locator = eocd - 20
+            zip64_eocd = int.from_bytes(data[locator + 8:locator + 16], "little")
+            directory_end = zip64_eocd
+    base = directory_end - cd_size - cd_off
+    if base < 0 or base > directory_end:
+        return 0
+    central = base + cd_off
+    if cd_size and data[central:central + 4] != _ZIP_CENTRAL:
+        return 0
+    return base
+
+
 def parse_zip(data: bytes) -> tuple[list[Node], int]:
     nodes: list[Node] = []
     eocd = _find_zip_eocd(data)
@@ -318,6 +344,8 @@ def parse_zip(data: bytes) -> tuple[list[Node], int]:
         values = _zip64_values(data, eocd)
         if values is not None:
             total, cd_size, cd_off = values
+    base = zip_data_base(data, eocd)
+    cd_off += base
     end = eocd + 22 + comment_len  # 注释属于 ZIP 本体,不算尾随数据
     if end > len(data):
         end = len(data)
@@ -334,7 +362,7 @@ def parse_zip(data: bytes) -> tuple[list[Node], int]:
         nlen = _u16le(data, pos + 28)
         elen = _u16le(data, pos + 30)
         clen = _u16le(data, pos + 32)
-        lho = _u32le(data, pos + 42)
+        lho = _u32le(data, pos + 42) + base
         raw = data[pos + 46:pos + 46 + nlen]
         try:
             name = raw.decode("utf-8" if flags & 0x800 else "gbk", "replace")
@@ -865,7 +893,7 @@ def gif_frame_offsets(data: bytes) -> list[int]:
 
 
 # ---------------------------------------------------------------- 图片基本信息
-def image_info(kind: str, data: bytes) -> list[tuple[str, str]]:
+def image_info(kind: str, data: bytes, *, deep_analysis: bool = True) -> list[tuple[str, str]]:
     """按格式返回可直接展示的 (项目, 值) 列表。"""
     if kind == "PNG":
         info = png_info(data)
@@ -884,7 +912,7 @@ def image_info(kind: str, data: bytes) -> list[tuple[str, str]]:
         ]
         if info.truncated:
             rows.append(("⚠ 截断", "存在长度字段超出文件末尾的 chunk"))
-        actual = png_actual_size(data)
+        actual = png_actual_size(data) if deep_analysis else None
         if actual:
             same = actual == (info.width, info.height)
             rows.append(("实际像素尺寸", f"{actual[0]} x {actual[1]}"

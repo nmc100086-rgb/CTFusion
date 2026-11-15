@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import io
 import os
 import threading
 import zipfile
 
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -20,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QMenu,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -28,12 +28,14 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from core import fileparse, zipcrack
 from ui.highlight import install_flag_highlighter, mark_item
+from ui.zip_attack_panels import CrcAttackPanel, KpaAttackPanel
 
 
 class CrackWorker(QThread):
@@ -64,8 +66,90 @@ class CrackWorker(QThread):
         self.cancel_event.set()
 
 
+class ExtractWorker(QThread):
+    """Extract archive entries without blocking the UI."""
+
+    progress = Signal(int, int, str)
+    resultReady = Signal(bool, str)
+
+    def __init__(self, path: str, target: str, password: bytes | None,
+                 allow_risky: bool = False) -> None:
+        super().__init__()
+        self.path = path
+        self.target = target
+        self.password = password
+        self.single_limit = (
+            zipcrack.HARD_EXTRACT_SINGLE
+            if allow_risky else zipcrack.MAX_EXTRACT_SINGLE
+        )
+        self.total_limit = (
+            zipcrack.HARD_EXTRACT_TOTAL
+            if allow_risky else zipcrack.MAX_EXTRACT_TOTAL
+        )
+        self.cancel_event = threading.Event()
+
+    def run(self) -> None:
+        extracted = 0
+        total_written = 0
+        try:
+            with zipfile.ZipFile(self.path) as archive:
+                entries = archive.infolist()
+                for index, info in enumerate(entries, 1):
+                    if self.cancel_event.is_set():
+                        self.resultReady.emit(
+                            False, f"已停止,已解压 {extracted}/{len(entries)} 个条目")
+                        return
+                    if not zipcrack.safe_extract_path(self.target, info.filename):
+                        self.resultReady.emit(
+                            False, f"检测到越界路径,已中止:{info.filename}")
+                        return
+                    destination = zipcrack.safe_extract_path(
+                        self.target, info.filename)
+                    assert destination is not None
+                    if info.is_dir():
+                        os.makedirs(destination, exist_ok=True)
+                        extracted += 1
+                        self.progress.emit(index, len(entries), info.filename)
+                        continue
+                    os.makedirs(os.path.dirname(destination), exist_ok=True)
+                    written = 0
+                    try:
+                        with archive.open(info, pwd=self.password) as source, \
+                                open(destination, "wb") as target_file:
+                            while True:
+                                if self.cancel_event.is_set():
+                                    raise RuntimeError("用户取消")
+                                chunk = source.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                written += len(chunk)
+                                total_written += len(chunk)
+                                if (written > self.single_limit
+                                        or total_written > self.total_limit):
+                                    raise RuntimeError("解压数据超过安全上限")
+                                target_file.write(chunk)
+                    except Exception:
+                        try:
+                            os.remove(destination)
+                        except OSError:
+                            pass
+                        raise
+                    extracted += 1
+                    self.progress.emit(index, len(entries), info.filename)
+        except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+            self.resultReady.emit(False, f"解压失败:{exc}")
+            return
+        self.resultReady.emit(True, f"已解压 {extracted} 个条目到:\n{self.target}")
+
+    def stop(self) -> None:
+        self.cancel_event.set()
+
+
 class ZipPanel(QWidget):
     """ZIP 结构查看、伪加密修复、密码恢复与安全解压。"""
+
+    openRequested = Signal(str)
+    pathChanged = Signal(str, str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -73,6 +157,7 @@ class ZipPanel(QWidget):
         self._data = b""
         self._info: zipcrack.ZipInspect | None = None
         self._worker: CrackWorker | None = None
+        self._extract_worker: ExtractWorker | None = None
         self._found_password: str | None = None
         self._found_password_bytes = b""
         self._result_received = False
@@ -100,6 +185,11 @@ class ZipPanel(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_structure(), "结构 / 伪加密")
         self.tabs.addTab(self._build_recovery(), "密码恢复")
+        self.crc_panel = CrcAttackPanel()
+        self.kpa_panel = KpaAttackPanel()
+        self.crc_panel.plaintextSelected.connect(self._on_crc_plaintext)
+        self.tabs.addTab(self.crc_panel, "CRC 爆破")
+        self.tabs.addTab(self.kpa_panel, "已知明文 (KPA)")
         layout.addWidget(self.tabs, 1)
 
     # ---------------- 结构 ----------------
@@ -239,16 +329,83 @@ class ZipPanel(QWidget):
         layout = QVBoxLayout(group)
         line = QHBoxLayout()
         line.addWidget(QLabel("掩码:"))
-        self.mask_edit = QLineEdit("?l?l?l?l")
-        self.mask_edit.setPlaceholderText("例如 qctf2026???? 或 ?l?l?d?d")
+        self.mask_edit = QLineEdit("????")
+        self.mask_edit.setPlaceholderText("例如 qctf2026????")
         line.addWidget(self.mask_edit, 1)
         layout.addLayout(line)
+
+        wildcard_line = QHBoxLayout()
+        wildcard_line.addWidget(QLabel("裸 ? 代表:"))
+        self.wildcard_button = QToolButton()
+        self.wildcard_button.setPopupMode(QToolButton.InstantPopup)
+        self.wildcard_menu = QMenu(self.wildcard_button)
+        self.wildcard_actions: dict[str, QAction] = {}
+        for code, label, _chars in zipcrack.WILDCARD_OPTIONS:
+            action = QAction(label, self.wildcard_menu)
+            action.setCheckable(True)
+            action.setData(code)
+            action.triggered.connect(
+                lambda checked, current=action: self._on_wildcard_action(
+                    current, checked))
+            self.wildcard_menu.addAction(action)
+            self.wildcard_actions[code] = action
+            if code in ("l", "u", "d"):
+                action.setChecked(True)
+        self.wildcard_button.setMenu(self.wildcard_menu)
+        wildcard_line.addWidget(self.wildcard_button)
+        wildcard_line.addStretch()
+        layout.addLayout(wildcard_line)
+        self._update_wildcard_label()
+
         help_label = QLabel(
-            "?l=小写  ?u=大写  ?d=数字  ?c=字母+数字  ?h=小写hex  "
-            "?H=大写hex  ?s=符号  ?a=全部可打印  ?=字母+数字  \\?=字面问号")
+            "每个裸 ? 都使用上方下拉菜单多选的字符集;"
+            "?l/?u/?d 等固定写法已移除。字面问号请写 \\?。")
         help_label.setStyleSheet("color:#888;")
+        help_label.setWordWrap(True)
         layout.addWidget(help_label)
         return group
+
+    def _on_wildcard_action(self, action: QAction, checked: bool) -> None:
+        code = str(action.data())
+        if action.isChecked() != checked:
+            action.blockSignals(True)
+            action.setChecked(checked)
+            action.blockSignals(False)
+        if checked and code == "a":
+            for other_code, other in self.wildcard_actions.items():
+                if other_code != "a":
+                    other.blockSignals(True)
+                    other.setChecked(False)
+                    other.blockSignals(False)
+        elif checked:
+            all_action = self.wildcard_actions["a"]
+            all_action.blockSignals(True)
+            all_action.setChecked(False)
+            all_action.blockSignals(False)
+
+        if not any(item.isChecked() for item in self.wildcard_actions.values()):
+            action.blockSignals(True)
+            action.setChecked(True)
+            action.blockSignals(False)
+        self._update_wildcard_label()
+
+    def _selected_wildcard_codes(self) -> list[str]:
+        return [
+            code for code, action in self.wildcard_actions.items()
+            if action.isChecked()
+        ]
+
+    def _update_wildcard_label(self) -> None:
+        codes = self._selected_wildcard_codes()
+        labels = {
+            code: label for code, label, _chars in zipcrack.WILDCARD_OPTIONS
+        }
+        chars = zipcrack.wildcard_charset(codes)
+        shown = [labels[code] for code in codes if code in labels]
+        self.wildcard_button.setText(
+            f"{' + '.join(shown)} ({len(chars)} 字符)")
+        self.wildcard_button.setToolTip(
+            "选择“所有可打印字符”时会自动取消其他选项")
 
     def _on_mode_changed(self, index: int) -> None:
         self.stack.setCurrentIndex(max(0, min(index, self.stack.count() - 1)))
@@ -268,7 +425,7 @@ class ZipPanel(QWidget):
         if not self._path:
             QMessageBox.information(self, "CTFusion", "请先打开 ZIP 文件")
             return
-        if self._worker is not None:
+        if self._worker is not None or self._extract_worker is not None:
             return
         mode = self.mode_combo.currentData() or "dictionary"
         config = zipcrack.CrackConfig(
@@ -279,6 +436,8 @@ class ZipPanel(QWidget):
             min_length=self.min_length.value(),
             max_length=self.max_length.value(),
             mask=self.mask_edit.text(),
+            wildcard_chars=zipcrack.wildcard_charset(
+                self._selected_wildcard_codes()),
             encoding=self.encoding_combo.currentData() or "utf-8",
         )
         self.recovery_log.clear()
@@ -367,18 +526,23 @@ class ZipPanel(QWidget):
             QGuiApplication.clipboard().setText(self._found_password)
             self.status.setText("密码已复制到剪贴板")
 
+    def _on_crc_plaintext(self, data: bytes, offset: int) -> None:
+        self.kpa_panel.receive_plaintext(data, offset)
+        self.tabs.setCurrentWidget(self.kpa_panel)
+
     # ---------------- 载入 / 结构刷新 ----------------
     def _choose_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "选择 ZIP", "", "ZIP (*.zip *.docx *.xlsx *.pptx *.jar *.apk *.epub)")
         if path:
-            self.load_file(path)
+            self.openRequested.emit(path)
 
     def load_file(self, path: str) -> bool:
-        if self._worker is not None:
-            self._worker.stop()
-            self._worker.wait(3000)
-            self._worker = None
+        if not self._stop_background():
+            QMessageBox.warning(
+                self, "CTFusion",
+                "后台任务仍在停止中,请稍后再打开其他 ZIP。")
+            return False
         try:
             with open(path, "rb") as f:
                 data = f.read()
@@ -408,6 +572,8 @@ class ZipPanel(QWidget):
         comment = "".join(ch if ch.isprintable() else "." for ch in info.comment)
         self.comment_label.setText(
             f"压缩包注释:{comment}" if comment else "压缩包注释:(无)")
+        self.crc_panel.set_archive(self._path, self._data, info)
+        self.kpa_panel.set_archive(self._path, self._data, info)
         if info.error:
             self.log.appendPlainText(f"⚠ {info.error}")
             return
@@ -465,9 +631,11 @@ class ZipPanel(QWidget):
         except OSError as e:
             QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
             return
+        old_path = self._path
         self.log.appendPlainText(f"✓ 已清除 {count} 个条目的伪加密标志:{path}")
         QMessageBox.information(self, "CTFusion", f"伪加密修复完成:\n{path}")
-        self.load_file(path)
+        if self.load_file(path):
+            self.pathChanged.emit(old_path, path)
 
     def _on_extract(self) -> None:
         if not self._data:
@@ -477,26 +645,107 @@ class ZipPanel(QWidget):
             return
         password = self._found_password_bytes or None
         try:
-            with zipfile.ZipFile(io.BytesIO(self._data)) as zf:
-                root = os.path.realpath(target)
-                for info in zf.infolist():
-                    destination = os.path.realpath(os.path.join(root, info.filename))
-                    try:
-                        inside = os.path.commonpath([root, destination]) == root
-                    except ValueError:
-                        inside = False
-                    if not inside:
-                        self.log.appendPlainText(f"⚠ 跳过越界路径:{info.filename}")
-                        continue
-                    zf.extract(info, target, pwd=password)
+            with zipfile.ZipFile(self._path) as archive:
+                entries = archive.infolist()
         except (OSError, zipfile.BadZipFile, RuntimeError) as e:
             QMessageBox.warning(self, "CTFusion", f"解压失败:{e}")
             return
-        self.log.appendPlainText(f"✓ 已解压到:{target}")
-        QMessageBox.information(self, "CTFusion", f"解压完成:\n{target}")
+        risks = zipcrack.extraction_risks(entries)
+        allow_risky = False
+        if risks:
+            detail = "\n".join(f"• {item}" for item in risks)
+            choice = QMessageBox.warning(
+                self, "检测到高风险 ZIP",
+                "以下内容超过默认安全限制:\n\n"
+                f"{detail}\n\n仍要继续解压吗?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if choice != QMessageBox.Yes:
+                self.log.appendPlainText("⚠ 已取消高风险 ZIP 解压")
+                return
+            allow_risky = True
+        if self._extract_worker is not None:
+            return
+        self.progress.setRange(0, max(1, len(entries)))
+        self.progress.setValue(0)
+        self.status.setText("正在后台解压…")
+        self.btn_extract.setEnabled(False)
+        self.btn_open.setEnabled(False)
+        self.btn_repair.setEnabled(False)
+        worker = ExtractWorker(self._path, target, password, allow_risky)
+        worker.progress.connect(self._on_extract_progress)
+        worker.resultReady.connect(self._on_extract_result)
+        worker.finished.connect(self._on_extract_finished)
+        self._extract_worker = worker
+        worker.start()
 
-    def shutdown(self) -> None:
-        if self._worker is not None:
-            self._worker.stop()
-            self._worker.wait(3000)
+    def _on_extract_progress(self, done: int, total: int, name: str) -> None:
+        self.progress.setRange(0, max(1, total))
+        self.progress.setValue(done)
+        self.status.setText(f"正在解压 {done}/{total}:{name[:80]}")
+
+    def _on_extract_result(self, ok: bool, message: str) -> None:
+        self.log.appendPlainText(("✓ " if ok else "⚠ ") + message)
+        if ok:
+            self.progress.setValue(self.progress.maximum())
+            QMessageBox.information(self, "CTFusion", message)
+        else:
+            self.progress.setValue(0)
+            QMessageBox.warning(self, "CTFusion", message)
+
+    def _on_extract_finished(self) -> None:
+        self._extract_worker = None
+        self.btn_open.setEnabled(True)
+        self.btn_extract.setEnabled(bool(self._info and self._info.entries))
+        self.btn_repair.setEnabled(bool(
+            self._info and any(entry.pseudo for entry in self._info.entries)))
+        if self.status.text().startswith("正在"):
+            self.status.setText("解压任务已结束")
+
+    def _stop_background(self, timeout_ms: int = 5_000) -> bool:
+        workers = [worker for worker in (self._worker, self._extract_worker)
+                   if worker is not None]
+        for worker in workers:
+            worker.stop()
+        for worker in workers:
+            if worker.isRunning() and not worker.wait(timeout_ms):
+                return False
+        if self._worker is not None and self._worker.isFinished():
             self._worker = None
+            self.btn_stop.setEnabled(False)
+            self.btn_start.setEnabled(bool(
+                self._info and any(entry.flags & 1 for entry in self._info.entries)))
+        if self._extract_worker is not None and self._extract_worker.isFinished():
+            self._on_extract_finished()
+        if not self.crc_panel.shutdown() or not self.kpa_panel.shutdown():
+            return False
+        return True
+
+    def shutdown(self) -> bool:
+        return self._stop_background()
+
+    def clear(self) -> bool:
+        if not self._stop_background():
+            return False
+        self._path = ""
+        self._data = b""
+        self._info = None
+        self._found_password = None
+        self._found_password_bytes = b""
+        self.table.setRowCount(0)
+        self.comment_label.setText("压缩包注释:(无)")
+        self.file_label.setText("拖入 ZIP 文件开始分析")
+        self.log.clear()
+        self.recovery_log.clear()
+        self.result_label.setText("密码:—")
+        self.btn_copy_pwd.setEnabled(False)
+        self.btn_extract.setEnabled(False)
+        self.btn_repair.setEnabled(False)
+        self.btn_start.setEnabled(False)
+        self.progress.setRange(0, 1000)
+        self.progress.setValue(0)
+        self.crc_panel.clear()
+        self.kpa_panel.clear()
+        self.status.setText("载入 ZIP 后选择模式开始恢复;仅支持 ZipCrypto,不支持 AES。")
+        return True

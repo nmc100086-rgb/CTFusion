@@ -4,10 +4,16 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.test-tmp/
+.codex-test-tmp/
+output/
 .venv/
 venv/
 build/
 dist/
 *.spec
-!MiscKit.spec
 *.exe
+!bin/bkcrack.exe
+.tmp/
+bin/bkcrack-release/
+bin/bkcrack-*.zip

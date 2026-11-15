@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -31,8 +32,9 @@ def b64url_encode(data: bytes) -> str:
 def b64url_decode(text: str) -> bytes:
     padding = "=" * (-len(text) % 4)
     try:
-        return base64.urlsafe_b64decode(text + padding)
-    except (ValueError, TypeError) as e:
+        raw = (text + padding).encode("ascii")
+        return base64.b64decode(raw, altchars=b"-_", validate=True)
+    except (ValueError, TypeError, UnicodeEncodeError, binascii.Error) as e:
         raise JwtError(f"Base64URL 解码失败:{e}") from e
 
 
@@ -50,8 +52,10 @@ def decode(token: str) -> DecodedJwt:
     try:
         header = json.loads(b64url_decode(parts[0]).decode("utf-8"))
         payload = json.loads(b64url_decode(parts[1]).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+    except (JwtError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise JwtError(f"JWT JSON 解析失败:{e}") from e
+    if not isinstance(header, dict) or not isinstance(payload, dict):
+        raise JwtError("JWT Header 和 Payload 都必须是 JSON 对象")
     return DecodedJwt(_json_text(header), _json_text(payload), parts[2],
                       header, payload)
 
@@ -80,6 +84,10 @@ def _rs_sign(secret: str, signing_input: bytes) -> bytes:
 
 def encode(payload: dict[str, Any], secret: str = "", alg: str = "HS256",
            header: dict[str, Any] | None = None) -> str:
+    if not isinstance(payload, dict):
+        raise JwtError("JWT Payload 必须是 JSON 对象")
+    if header is not None and not isinstance(header, dict):
+        raise JwtError("JWT Header 必须是 JSON 对象")
     header = dict(header or {"typ": "JWT", "alg": alg})
     header["alg"] = alg
     header_part = b64url_encode(
@@ -102,7 +110,10 @@ def verify(token: str, secret: str) -> bool:
     parts = token.strip().split(".")
     if len(parts) != 3:
         return False
-    decoded = decode(token)
+    try:
+        decoded = decode(token)
+    except JwtError:
+        return False
     alg = str(decoded.header.get("alg", ""))
     signing_input = f"{parts[0]}.{parts[1]}".encode("ascii")
     try:

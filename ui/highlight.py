@@ -12,8 +12,9 @@ from PySide6.QtCore import QRegularExpression
 from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import QPlainTextEdit, QTableWidgetItem
 
-FLAG_RE = re.compile(r"\b(?:flag|ctf|key)\s*\{[^}\n]{0,300}\}", re.IGNORECASE)
-KEYWORD_RE = re.compile(r"\b(?:flag|ctf|key)\b", re.IGNORECASE)
+from core.sensitive import FLAG_RE
+
+KEYWORD_RE = re.compile(r"(?i)\b(?:flag|ctf|key)\b")
 BRACE_RE = re.compile(r"[{}]")
 HIDDEN_RE = re.compile("[\u200b-\u200f\u2060\ufeff]")
 

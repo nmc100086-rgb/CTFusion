@@ -12,10 +12,9 @@ extract_bytes 支持:
 from __future__ import annotations
 
 import itertools
-import re
 from dataclasses import dataclass
 
-_FLAG_RE = re.compile(r"\b(?:flag|ctf|key)\s*\{[^}\n]{0,300}\}", re.IGNORECASE)
+from core.sensitive import FLAG_RE as _FLAG_RE
 
 
 def _normalise_channels(channels: int, channel: int,

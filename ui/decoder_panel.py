@@ -27,6 +27,14 @@ from PySide6.QtWidgets import (
 from core.chain import smart_decode
 from core.codecs import get_all
 from core.codecs.base import CodecBase, CodecError
+from core.sensitive import (
+    CATEGORY_CREDENTIAL,
+    CATEGORY_FLAG,
+    CATEGORY_HASH,
+    CATEGORY_PATH,
+    CATEGORY_SECRET,
+    CATEGORY_URL,
+)
 from ui.highlight import (
     FLAG_BG,
     FLAG_FG,
@@ -45,6 +53,7 @@ class DecoderPanel(QWidget):
         self._param_labels: list[QLabel] = []
         self._raw_output: str = ""
         self._last_codec: CodecBase | None = None
+        self._smart_hits: list = []
         self._build_ui()
         self._on_codec_changed(0)
 
@@ -142,11 +151,30 @@ class DecoderPanel(QWidget):
         layout.addWidget(self.hidden_label)
 
         # 智能解码结果
-        layout.addWidget(QLabel("智能解码结果(双击填入输出区):"))
+        smart_head = QHBoxLayout()
+        smart_head.addWidget(QLabel("智能解码结果(双击填入输出区):"))
+        smart_head.addStretch()
+        smart_head.addWidget(QLabel("显示:"))
+        self.smart_filter = QComboBox()
+        self.smart_filter.addItem("全部结果", "")
+        for label, value in (
+            ("Flag", CATEGORY_FLAG),
+            ("路径", CATEGORY_PATH),
+            ("凭据", CATEGORY_CREDENTIAL),
+            ("疑似密码", CATEGORY_SECRET),
+            ("URL", CATEGORY_URL),
+            ("哈希", CATEGORY_HASH),
+            ("普通文本", "文本"),
+        ):
+            self.smart_filter.addItem(label, value)
+        self.smart_filter.currentIndexChanged.connect(self._render_smart_hits)
+        smart_head.addWidget(self.smart_filter)
+        layout.addLayout(smart_head)
         self.result_tree = QTreeWidget()
-        self.result_tree.setHeaderLabels(["解码路径", "结果预览", "评分"])
-        self.result_tree.setColumnWidth(0, 220)
-        self.result_tree.setColumnWidth(1, 560)
+        self.result_tree.setHeaderLabels(["类型", "解码路径", "结果预览", "评分"])
+        self.result_tree.setColumnWidth(0, 90)
+        self.result_tree.setColumnWidth(1, 220)
+        self.result_tree.setColumnWidth(2, 500)
         self.result_tree.itemDoubleClicked.connect(self._on_hit_double_clicked)
         layout.addWidget(self.result_tree)
 
@@ -320,6 +348,18 @@ class DecoderPanel(QWidget):
             kwargs["iv"] = self.iv_edit.text()
         if codec.need_alphabet:
             kwargs["alphabet"] = self.alphabet_edit.text()
+        if codec.name == "JSFuck" and direction == "decode":
+            choice = QMessageBox.warning(
+                self, "JSFuck 安全确认",
+                "JSFuck 解码会在本机 Node.js 中执行输入代码。\n"
+                "恶意代码可能读取文件、访问网络或修改数据。\n\n"
+                "仅对可信输入继续。",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if choice != QMessageBox.Yes:
+                return
+            kwargs["allow_execution"] = "1"
         try:
             out = fn(text, **kwargs, **self._collect_params())
         except CodecError as e:
@@ -373,16 +413,30 @@ class DecoderPanel(QWidget):
             hits = smart_decode(text)
         finally:
             QApplication.restoreOverrideCursor()
+        self._smart_hits = hits
         if not hits:
             self._info("未能识别出有效编码。\n可尝试手动选择算法,或检查输入是否完整。")
             return
+        self._render_smart_hits()
+
+    def _render_smart_hits(self, _index: int = -1) -> None:
+        self.result_tree.clear()
+        selected = self.smart_filter.currentData()
+        hits = [
+            hit for hit in self._smart_hits
+            if not selected or hit.category == selected
+        ]
+        if not hits:
+            return
         for hit in hits:
             preview = self._display(hit.output).replace("\n", " ⏎ ")[:120]
-            item = QTreeWidgetItem([" → ".join(hit.path), preview, f"{hit.score:.2f}"])
+            item = QTreeWidgetItem([
+                hit.category, " → ".join(hit.path), preview, f"{hit.score:.2f}"
+            ])
             item.setData(0, Qt.UserRole, hit.output)
             if has_flag(hit.output):
-                item.setBackground(1, FLAG_BG)
-                item.setForeground(1, FLAG_FG)
+                item.setBackground(2, FLAG_BG)
+                item.setForeground(2, FLAG_FG)
             self.result_tree.addTopLevelItem(item)
 
     def _on_hit_double_clicked(self, item: QTreeWidgetItem, _col: int) -> None:
