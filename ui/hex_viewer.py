@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
+
 from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QRect, Qt, Signal
 from PySide6.QtGui import (
     QColor,
@@ -20,6 +22,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QStyle,
@@ -36,6 +39,7 @@ from core.analysis import interpret_at
 from ui.highlight import has_flag
 
 _BYTES_PER_ROW = 16
+_TEXT_MARGIN = 4
 
 
 class HexTableModel(QAbstractTableModel):
@@ -47,11 +51,15 @@ class HexTableModel(QAbstractTableModel):
         super().__init__()
         self._data = data
         self._highlight_ranges: list[tuple[int, int]] = []
+        self._highlight_starts: list[int] = []
+        self._byte_selection: tuple[int, int] | None = None
 
     def set_data(self, data: bytes) -> None:
         self.beginResetModel()
         self._data = data
         self._highlight_ranges.clear()
+        self._highlight_starts.clear()
+        self._byte_selection = None
         self.endResetModel()
 
     def set_search_matches(self, offsets: list[int], length: int) -> None:
@@ -61,6 +69,7 @@ class HexTableModel(QAbstractTableModel):
             for offset in offsets
             if 0 <= offset < len(self._data)
         ]
+        self._highlight_starts = [first for first, _last in self._highlight_ranges]
         if self._data:
             self.dataChanged.emit(self.index(0, 0),
                                   self.index(self.rowCount() - 1, self.COLS - 1))
@@ -69,16 +78,26 @@ class HexTableModel(QAbstractTableModel):
         if not self._highlight_ranges:
             return
         self._highlight_ranges.clear()
+        self._highlight_starts.clear()
         if self._data:
             self.dataChanged.emit(self.index(0, 0),
                                   self.index(self.rowCount() - 1, self.COLS - 1))
 
     def match_bytes_for_row(self, row: int) -> set[int]:
-        """返回该行内的字节位置(0~15),不是全局 offset。"""
+        """返回该行内的字节位置(0~15),不是全局 offset。
+
+        搜索可能有数万条命中;用 sorted starts 做二分,避免每个可见行
+        都从头遍历全部命中区间。
+        """
+        if not self._highlight_ranges:
+            return set()
         start = row * _BYTES_PER_ROW
         end = min(len(self._data), start + _BYTES_PER_ROW)
+        index = bisect_right(self._highlight_starts, start) - 1
+        if index < 0:
+            index = 0
         matched: set[int] = set()
-        for first, last in self._highlight_ranges:
+        for first, last in self._highlight_ranges[index:]:
             if last <= start:
                 continue
             if first >= end:
@@ -86,6 +105,60 @@ class HexTableModel(QAbstractTableModel):
             matched.update(range(max(start, first) - start,
                                  min(end, last) - start))
         return matched
+
+    def _emit_selection_rows(self, first_row: int, last_row: int) -> None:
+        if not self._data or last_row < first_row:
+            return
+        last = min(last_row, self.rowCount() - 1)
+        first = max(0, first_row)
+        if last >= first:
+            self.dataChanged.emit(self.index(first, 1), self.index(last, 2))
+
+    def set_byte_selection(self, anchor: int, focus: int) -> None:
+        """Set the byte range selected by mouse drag (inclusive offsets)."""
+        if not self._data:
+            self.clear_byte_selection()
+            return
+        start = max(0, min(anchor, focus, len(self._data) - 1))
+        end = min(len(self._data), max(anchor, focus) + 1)
+        new_range = (start, end)
+        if new_range == self._byte_selection:
+            return
+        old = self._byte_selection
+        self._byte_selection = new_range
+        if old is None:
+            self._emit_selection_rows(start // _BYTES_PER_ROW,
+                                      (end - 1) // _BYTES_PER_ROW)
+            return
+        old_start, old_end = old
+        # 只重绘边界行:选区内部已经画过,不必每次拖动都全量刷新。
+        if start != old_start:
+            self._emit_selection_rows(
+                min(start, old_start) // _BYTES_PER_ROW,
+                max(start, old_start) // _BYTES_PER_ROW)
+        if end != old_end:
+            self._emit_selection_rows(
+                min(end - 1, old_end - 1) // _BYTES_PER_ROW,
+                max(end - 1, old_end - 1) // _BYTES_PER_ROW)
+
+    def clear_byte_selection(self) -> None:
+        if self._byte_selection is None:
+            return
+        first, last = self._byte_selection
+        self._byte_selection = None
+        self._emit_selection_rows(first // _BYTES_PER_ROW,
+                                  (last - 1) // _BYTES_PER_ROW)
+
+    def selection_bytes_for_row(self, row: int) -> set[int]:
+        if self._byte_selection is None:
+            return set()
+        start = row * _BYTES_PER_ROW
+        end = min(len(self._data), start + _BYTES_PER_ROW)
+        first, last = self._byte_selection
+        if last <= start or first >= end:
+            return set()
+        return set(range(max(start, first) - start,
+                         min(end, last) - start))
 
     @property
     def data_bytes(self) -> bytes:
@@ -135,10 +208,8 @@ class HexTableModel(QAbstractTableModel):
             return QColor("#6f5200")
         if role == Qt.ForegroundRole and index.column() == 0:
             return QColor("#7a7a7a")
-        if role == Qt.FontRole:
-            font = QFont("Consolas")
-            font.setStyleHint(QFont.Monospace)
-            return font
+        # 不要返回独立的 QFont("Consolas") as FontRole:它的默认字号
+        # 可能和表格字号不同,导致绘制宽度与命中测试/选区计算不一致。
         return None
 
     def replace(self, offset: int, new: bytes) -> bool:
@@ -162,7 +233,7 @@ class HexDelegate(QStyledItemDelegate):
         model = index.model()
         if (index.column() not in (1, 2)
                 or not isinstance(model, HexTableModel)
-                or not model._highlight_ranges):
+                or not (model._highlight_ranges or model._byte_selection)):
             super().paint(painter, option, index)
             return
         opt = QStyleOptionViewItem(option)
@@ -173,10 +244,11 @@ class HexDelegate(QStyledItemDelegate):
         text = index.data(Qt.DisplayRole) or ""
         row = index.row()
         matched = model.match_bytes_for_row(row)
-        if not matched:
+        selected = model.selection_bytes_for_row(row)
+        if not matched and not selected:
             painter.save()
             painter.setPen(opt.palette.color(QPalette.Text))
-            painter.drawText(opt.rect.adjusted(4, 0, -4, 0),
+            painter.drawText(opt.rect.adjusted(_TEXT_MARGIN, 0, -_TEXT_MARGIN, 0),
                              Qt.AlignVCenter, text)
             painter.restore()
             return
@@ -184,27 +256,33 @@ class HexDelegate(QStyledItemDelegate):
         metrics = QFontMetrics(font)
         painter.save()
         painter.setFont(font)
-        x0 = opt.rect.left() + 4
+        x0 = opt.rect.left() + _TEXT_MARGIN
         y0 = opt.rect.top()
         height = opt.rect.height()
-        # 命中字节的背景
-        # 亮黄色底 + 深色字,避免深色底把原本的文字盖住。
-        highlight = QColor("#ffd54f")
-        if index.column() == 1:
-            for pos in matched:
-                start = pos * 3
-                x = x0 + metrics.horizontalAdvance(text[:start])
-                width = metrics.horizontalAdvance(text[start:start + 2])
-                painter.fillRect(QRect(x, y0, width, height), highlight)
-        else:
-            for pos in matched:
-                if pos >= len(text):
-                    continue
-                x = x0 + metrics.horizontalAdvance(text[:pos])
-                width = metrics.horizontalAdvance(text[pos])
-                painter.fillRect(QRect(x, y0, width, height), highlight)
+
+        def fill_positions(positions: set[int], color: QColor) -> None:
+            if index.column() == 1:
+                for pos in positions:
+                    start = pos * 3
+                    if start >= len(text):
+                        continue
+                    x = x0 + metrics.horizontalAdvance(text[:start])
+                    width = metrics.horizontalAdvance(text[start:start + 2])
+                    painter.fillRect(QRect(x, y0, width, height), color)
+            else:
+                for pos in positions:
+                    if pos >= len(text):
+                        continue
+                    x = x0 + metrics.horizontalAdvance(text[:pos])
+                    width = metrics.horizontalAdvance(text[pos])
+                    painter.fillRect(QRect(x, y0, width, height), color)
+
+        # 鼠标拖选:先铺半透明蓝,再叠搜索命中黄;两者可同时看见。
+        fill_positions(selected, QColor(37, 99, 235, 90))
+        fill_positions(matched, QColor("#ffd54f"))
         painter.setPen(QColor("#111111"))
-        painter.drawText(opt.rect.adjusted(4, 0, -4, 0), Qt.AlignVCenter, text)
+        painter.drawText(opt.rect.adjusted(_TEXT_MARGIN, 0, -_TEXT_MARGIN, 0),
+                         Qt.AlignVCenter, text)
         painter.restore()
 
 
@@ -231,6 +309,7 @@ class HexViewer(QWidget):
         self._read_only = False
         self._copy_anchor: int | None = None
         self._copy_focus: int | None = None
+        self._copy_column: int | None = None
         self._search_truncated = False
         self._build_ui()
 
@@ -276,8 +355,10 @@ class HexViewer(QWidget):
         bar.addWidget(self.btn_next)
 
         self.btn_copy = QPushButton("复制选区")
-        self.btn_copy.setToolTip("把选中的字节复制为十六进制字符串")
-        self.btn_copy.clicked.connect(self._copy_selection)
+        self.btn_copy.setToolTip(
+            "复制选中字节:Hex 列复制 HEX,ASCII 列复制 ASCII 文本;"
+            "也支持 Ctrl+C 和右键菜单")
+        self.btn_copy.clicked.connect(lambda: self._copy_selection())
         bar.addWidget(self.btn_copy)
 
         bar.addSpacing(12)
@@ -313,19 +394,29 @@ class HexViewer(QWidget):
         self.table = QTableView()
         self.table.setModel(self.model)
         self.table.setItemDelegate(HexDelegate(self.table))
-        # 搜索时需要只选中命中的单元格,不能用整行选中盖住精确高亮。
+        # 用自定义的字节级蓝色选区,而不是整格选中;否则 Hex 单元格的
+        # 16 个字节会一起变成蓝色,看不出鼠标到底拖选了哪几个字节。
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
-        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setWordWrap(False)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.setFont(QFont("Consolas"))
+        self._char_width = max(
+            1, QFontMetrics(self.table.font()).horizontalAdvance("0"))
+        # 偏移/ASCII 列固定宽度。用 ResizeToContents 时,每次拖动选区
+        # 的 dataChanged 都会触发 Qt 重新测量整列所有行,大文件会明显卡顿。
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        self.table.setColumnWidth(0, self._char_width * 10)
+        self.table.setColumnWidth(2, self._char_width * 18)
         self.table.selectionModel().currentChanged.connect(self._on_current_changed)
         # QTableView 会吃掉双击事件,在 viewport 上装事件过滤器才能拿到精确坐标。
         self.table.viewport().installEventFilter(self)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_copy_menu)
         layout.addWidget(self.table, 1)
 
         self.inspector = QTableWidget(0, 2)
@@ -339,6 +430,10 @@ class HexViewer(QWidget):
         QShortcut(QKeySequence.Undo, self, activated=self.undo)
         QShortcut(QKeySequence.Redo, self, activated=self.redo)
         QShortcut(QKeySequence.Save, self, activated=self._request_save)
+        # 只在表格获得焦点时接管 Ctrl+C,避免搜索框里的复制被拦截。
+        self._copy_shortcut = QShortcut(QKeySequence.Copy, self.table)
+        self._copy_shortcut.setContext(Qt.WidgetShortcut)
+        self._copy_shortcut.activated.connect(self._copy_selection)
         self._update_state()
 
     # ---------------- 数据 ----------------
@@ -358,6 +453,7 @@ class HexViewer(QWidget):
         self._modified = False
         self._copy_anchor = None
         self._copy_focus = None
+        self._copy_column = None
         self.table.setToolTip(
             "只读文件:双击修改会被拒绝,可使用「保存副本…」" if read_only else "")
         self._update_state()
@@ -391,6 +487,12 @@ class HexViewer(QWidget):
         if not index.isValid():
             return 0
         return index.row() * _BYTES_PER_ROW
+
+    def _clear_byte_selection(self) -> None:
+        self._copy_anchor = None
+        self._copy_focus = None
+        self._copy_column = None
+        self.model.clear_byte_selection()
 
     def goto_offset(self, offset: int) -> None:
         if not self._data:
@@ -551,16 +653,28 @@ class HexViewer(QWidget):
                     self._edit_byte(self._offset_from_pos(index, pos.x()))
                     return True
             if (event_type == QEvent.MouseButtonPress
-                    and event.button() == Qt.LeftButton and index.isValid()
-                    and index.column() in (1, 2)):
-                offset = self._offset_from_pos(index, pos.x())
-                if not (event.modifiers() & Qt.ShiftModifier):
-                    self._copy_anchor = offset
-                self._copy_focus = offset
+                    and event.button() == Qt.LeftButton):
+                if index.isValid() and index.column() in (1, 2):
+                    offset = self._offset_from_pos(index, pos.x())
+                    self._copy_column = index.column()
+                    if not (event.modifiers() & Qt.ShiftModifier):
+                        self._copy_anchor = offset
+                    elif self._copy_anchor is None:
+                        self._copy_anchor = offset
+                    self._copy_focus = offset
+                    self.model.set_byte_selection(
+                        self._copy_anchor, self._copy_focus)
+                elif index.isValid() and index.column() == 0:
+                    # 点偏移列时清掉字节选区,避免旧蓝底残留。
+                    self._clear_byte_selection()
             if (event_type == QEvent.MouseMove
                     and event.buttons() & Qt.LeftButton and index.isValid()
                     and index.column() in (1, 2)):
                 self._copy_focus = self._offset_from_pos(index, pos.x())
+                if self._copy_anchor is None:
+                    self._copy_anchor = self._copy_focus
+                self.model.set_byte_selection(
+                    self._copy_anchor, self._copy_focus)
         return super().eventFilter(watched, event)
 
     def _edit_byte(self, offset: int) -> None:
@@ -619,15 +733,34 @@ class HexViewer(QWidget):
         if index.column() not in (1, 2):
             return min(row_start, max(0, len(self._data) - 1))
         rect = self.table.visualRect(index)
-        char_w = QFontMetrics(self.table.font()).horizontalAdvance("0")
-        if rect.isNull() or char_w <= 0:
+        if rect.isNull():
             return row_start
+        text_x = rect.x() + _TEXT_MARGIN
+        text = index.data(Qt.DisplayRole) or ""
+        metrics = QFontMetrics(self.table.font())
+        available = min(_BYTES_PER_ROW, max(0, len(self._data) - row_start))
+        chosen = 0
         if index.column() == 1:
-            pos = int((x - rect.x()) / (char_w * 3))
+            # Hex 文本是 "41 42 ...";按每个前缀的真实 advance 命中。
+            # 不能简单用 char_width*3:空格和数字的实际宽度可能不同,
+            # 固定步长会随字节位置累积误差,到行尾就明显错位。
+            for pos in range(available):
+                start = pos * 3
+                if start >= len(text):
+                    break
+                left = text_x + metrics.horizontalAdvance(text[:start])
+                if x >= left:
+                    chosen = pos
+                else:
+                    break
         else:
-            pos = int((x - rect.x()) / char_w)
-        return min(row_start + max(0, min(pos, _BYTES_PER_ROW - 1)),
-                   max(0, len(self._data) - 1))
+            for pos in range(min(available, len(text))):
+                left = text_x + metrics.horizontalAdvance(text[:pos])
+                if x >= left:
+                    chosen = pos
+                else:
+                    break
+        return min(row_start + chosen, max(0, len(self._data) - 1))
 
     def _update_inspector(self, offset: int) -> None:
         rows = interpret_at(self._data, offset)
@@ -731,19 +864,58 @@ class HexViewer(QWidget):
         self._match_pos = (self._match_pos + delta) % len(self._matches)
         self.match_label.setText(self._match_status_text())
         self.goto_offset(self._matches[self._match_pos])
-        # 选中单元格的底色会盖住精确字节高亮,搜索跳转后只保留当前单元格。
-        self.table.clearSelection()
+        # 搜索跳转时清掉旧的字节选区,避免与新的命中位置混淆。
+        self._clear_byte_selection()
 
-    def _copy_selection(self) -> None:
+    def _show_copy_menu(self, pos) -> None:
+        index = self.table.indexAt(pos)
+        menu = QMenu(self)
+        copy_hex = menu.addAction("复制选中 HEX (Ctrl+C)")
+        copy_text = menu.addAction("复制选中 ASCII 文本")
+        enabled = self._copy_anchor is not None
+        copy_hex.setEnabled(enabled)
+        copy_text.setEnabled(enabled)
+        copy_row = menu.addAction("复制当前行 HEX")
+        copy_row.setEnabled(index.isValid())
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is copy_hex:
+            self._copy_selection(as_text=False)
+        elif chosen is copy_text:
+            self._copy_selection(as_text=True)
+        elif chosen is copy_row:
+            self._copy_row(index.row())
+
+    def _copy_row(self, row: int) -> None:
+        start = max(0, row) * _BYTES_PER_ROW
+        if start >= len(self._data):
+            return
+        end = min(len(self._data), start + _BYTES_PER_ROW)
+        self._copy_anchor = start
+        self._copy_focus = end - 1
+        self._copy_column = 1
+        self.model.set_byte_selection(start, end - 1)
+        self._copy_selection(as_text=False)
+
+    def _copy_selection(self, as_text: bool | None = None) -> None:
         if (self._copy_anchor is not None and self._copy_focus is not None
                 and self._copy_anchor < len(self._data)):
             start = min(self._copy_anchor, self._copy_focus)
             end = min(len(self._data), max(self._copy_anchor, self._copy_focus) + 1)
-            text = self._data[start:end].hex(" ")
+            if as_text is None:
+                as_text = self._copy_column == 2
+            data = self._data[start:end]
+            if as_text:
+                text = "".join(
+                    chr(byte) if 32 <= byte <= 126 else "." for byte in data)
+                kind = "ASCII"
+            else:
+                text = data.hex(" ")
+                kind = "HEX"
             from PySide6.QtWidgets import QApplication
 
             QApplication.clipboard().setText(text)
-            self.match_label.setText(f"已复制 {end - start} 字节")
+            self.match_label.setText(
+                f"已复制 {end - start} 字节 ({kind})")
             return
 
         indexes = self.table.selectionModel().selectedIndexes()

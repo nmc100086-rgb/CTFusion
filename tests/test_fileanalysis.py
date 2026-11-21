@@ -745,8 +745,8 @@ class AnalysisTests(unittest.TestCase):
 
 
 try:
-    from PySide6.QtCore import QBuffer, QIODevice, Qt
-    from PySide6.QtGui import QColor, QImage
+    from PySide6.QtCore import QBuffer, QEvent, QIODevice, QPoint, Qt
+    from PySide6.QtGui import QColor, QFontMetrics, QImage, QMouseEvent
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
 
@@ -1029,6 +1029,94 @@ class FilePanelSmokeTests(unittest.TestCase):
             )
         finally:
             window.close()
+
+    def test_hex_mouse_select_and_copy(self):
+        from ui.hex_viewer import HexViewer
+
+        viewer = HexViewer()
+        try:
+            viewer.resize(1000, 300)
+            viewer.set_data(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+            viewer.show()
+            self.app.processEvents()
+            table = viewer.table
+            font_width = QFontMetrics(table.font()).horizontalAdvance("0")
+            self.assertEqual(font_width, viewer._char_width)
+            self.assertIsNone(
+                viewer.model.data(viewer.model.index(0, 2), Qt.FontRole))
+
+            hex_rect = table.visualRect(viewer.model.index(0, 1))
+            QTest.mouseClick(
+                table.viewport(), Qt.LeftButton,
+                pos=QPoint(hex_rect.x() + 2, hex_rect.center().y()))
+            self.app.processEvents()
+            self.assertEqual((viewer._copy_anchor, viewer._copy_focus), (0, 0))
+            viewer._copy_selection()
+            self.assertEqual(QApplication.clipboard().text(), "41")
+
+            table.setFocus()
+            QApplication.clipboard().clear()
+            QTest.keyClick(viewer, Qt.Key_C, Qt.ControlModifier)
+            self.app.processEvents()
+            self.assertEqual(QApplication.clipboard().text(), "41")
+
+            start = QPoint(hex_rect.x() + 1, hex_rect.center().y())
+            end = QPoint(start.x() + int(font_width * 3 * 3.5), start.y())
+            QTest.mousePress(table.viewport(), Qt.LeftButton, pos=start)
+            QApplication.sendEvent(
+                table.viewport(),
+                QMouseEvent(QEvent.MouseMove, end,
+                            table.viewport().mapToGlobal(end),
+                            Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+            QTest.mouseRelease(table.viewport(), Qt.LeftButton, pos=end)
+            self.app.processEvents()
+            self.assertEqual(viewer.model._byte_selection, (0, 4))
+            viewer._copy_selection()
+            self.assertEqual(QApplication.clipboard().text(),
+                             "41 42 43 44")
+
+            ascii_rect = table.visualRect(viewer.model.index(0, 2))
+            QTest.mouseClick(
+                table.viewport(), Qt.LeftButton,
+                pos=QPoint(ascii_rect.x() + int(font_width * 2.5),
+                           ascii_rect.center().y()))
+            self.app.processEvents()
+            self.assertEqual(viewer._copy_anchor, 2)
+            viewer.btn_copy.click()
+            self.app.processEvents()
+            self.assertEqual(QApplication.clipboard().text(), "C")
+            viewer._copy_selection(as_text=False)
+            self.assertEqual(QApplication.clipboard().text(), "43")
+
+            # ASCII 文本有 4px 左边距;点在第二个字符内部应映射到 1。
+            # 重新取 rect:点击靠近右边缘时 QTableView 可能横向滚动。
+            ascii_rect = table.visualRect(viewer.model.index(0, 2))
+            QTest.mouseClick(
+                table.viewport(), Qt.LeftButton,
+                pos=QPoint(ascii_rect.x() + 4 + int(font_width * 1.2),
+                           ascii_rect.center().y()))
+            self.app.processEvents()
+            self.assertEqual(viewer._copy_anchor, 1)
+            viewer._copy_selection()
+            self.assertEqual(QApplication.clipboard().text(), "B")
+
+            # Hex 文本不是等步长:空格与数字 advance 不同,必须按真实
+            # 前缀宽度命中;抽查行尾几个字节,防止累计漂移。
+            hex_index = viewer.model.index(0, 1)
+            hex_text = hex_index.data(Qt.DisplayRole)
+            metrics = QFontMetrics(table.font())
+            for pos in (0, 5, 10, 15):
+                left = (hex_rect.x() + 4
+                        + metrics.horizontalAdvance(hex_text[:pos * 3]))
+                right = (hex_rect.x() + 4
+                         + metrics.horizontalAdvance(hex_text[:pos * 3 + 2]))
+                QTest.mouseClick(
+                    table.viewport(), Qt.LeftButton,
+                    pos=QPoint((left + right) // 2, hex_rect.center().y()))
+                self.app.processEvents()
+                self.assertEqual(viewer._copy_anchor, pos)
+        finally:
+            viewer.close()
 
     def test_hex_copy_uses_exact_byte_range(self):
         window = MainWindow()
