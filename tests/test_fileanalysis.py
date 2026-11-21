@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import os
+import random
 import struct
 import sys
 import tempfile
@@ -591,6 +592,33 @@ class ZipCrackTests(unittest.TestCase):
             with open(output, "rb") as f:
                 self.assertEqual(f.read(), content)
 
+    @unittest.skipUnless(
+        bkcrack.bkcrack_info().available, "需要 bin/bkcrack.exe")
+    def test_bkcrack_known_plaintext_data_descriptor(self):
+        # WinRAR 常见 bit 3 ZIP:合成 ZIP 必须保留 bit 3 和 DOS 时间,
+        # 否则 bkcrack 会拿 CRC 高字节当校验字节,攻击必然失败。
+        rng = random.Random(1234)
+        content = bytes(rng.randrange(256) for _ in range(400))
+        data = zipcrypto_bytes("pass123", content=content, name="dd.bin",
+                               data_descriptor=True)
+        info = zipcrack.inspect(data)
+        entry = info.entries[0]
+        self.assertTrue(entry.flags & 0x08)
+        self.assertTrue(entry.dos_time)
+        synthetic = bkcrack.build_synthetic_zip(
+            entry, bkcrack._extract_ciphertext(data, entry))
+        self.assertTrue(int.from_bytes(synthetic[6:8], "little") & 0x08)
+        self.assertEqual(int.from_bytes(synthetic[10:12], "little"),
+                         entry.dos_time)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "dd.zip")
+            with open(path, "wb") as f:
+                f.write(data)
+            result = bkcrack.attack(bkcrack.KpaConfig(
+                path=path, entry_index=0, plaintext=content, data=data))
+            self.assertTrue(result.success, result.error)
+            self.assertIsNotNone(result.keys)
+
     def test_bkcrack_parse_keys_and_synthetic_zip(self):
         self.assertEqual(
             bkcrack.parse_keys("Keys: 12345678 23456789 34567890"),
@@ -862,7 +890,125 @@ class FilePanelSmokeTests(unittest.TestCase):
             self.assertEqual(viewer.search_edit.text(), "hello")
             self.assertEqual(len(viewer._matches), 2)
             self.assertTrue(viewer.model._highlight_bytes)
+            self.assertIn("命中", viewer.match_label.text())
             viewer.set_data(b"")
+        finally:
+            window.close()
+
+    def test_hex_search_survives_save_as(self):
+        window = MainWindow()
+        try:
+            panel = window.file_panel
+            with tempfile.TemporaryDirectory() as tmp:
+                source = os.path.join(tmp, "source.bin")
+                saved = os.path.join(tmp, "saved.bin")
+                with open(source, "wb") as f:
+                    f.write(b"hello" + b"X" * 27 + b"hello")
+                self.assertTrue(panel.load_file(source))
+                viewer = panel.hex_viewer
+                viewer.search_mode.setCurrentIndex(
+                    viewer.search_mode.findData("ascii"))
+                viewer.search_edit.setText("hello")
+                viewer._on_search()
+                self.assertTrue(viewer.apply_edit(10, b"Y"))
+                with patch("ui.file_panel.QFileDialog.getSaveFileName",
+                           return_value=(saved, "")):
+                    panel._save_as()
+                self.assertEqual(viewer.search_edit.text(), "hello")
+                self.assertEqual(viewer._matches, [0, 32])
+                self.assertEqual(
+                    viewer.model._highlight_ranges, [(0, 5), (32, 37)])
+                self.assertIn("命中", viewer.match_label.text())
+        finally:
+            window.close()
+
+    def test_hex_edit_byte_keeps_search_status(self):
+        window = MainWindow()
+        try:
+            viewer = window.file_panel.hex_viewer
+            viewer.set_data(b"hello" + b"X" * 27 + b"hello")
+            viewer.search_mode.setCurrentIndex(
+                viewer.search_mode.findData("ascii"))
+            viewer.search_edit.setText("hello")
+            viewer._on_search()
+            with patch("ui.hex_viewer.QInputDialog.getText",
+                       return_value=("59", True)):
+                viewer._edit_byte(10)
+            self.assertEqual(viewer.data_bytes[10:11], b"Y")
+            self.assertEqual(viewer._matches, [0, 32])
+            self.assertIn("搜索", viewer.match_label.text())
+            self.assertIn("命中", viewer.match_label.text())
+            viewer.set_data(b"")
+        finally:
+            window.close()
+
+    def test_string_filter_no_match_shows_hint(self):
+        window = MainWindow()
+        try:
+            panel = window.file_panel
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "strings.txt")
+                with open(path, "wb") as f:
+                    f.write(b"hello world\nflag{abc}\n")
+                panel.load_file(path)
+            panel.string_filter.setText("zzz-no-match")
+            panel._refresh_strings()
+            self.assertEqual(panel.string_table.rowCount(), 1)
+            self.assertIn("没有找到", panel.string_table.item(0, 1).text())
+        finally:
+            window.close()
+
+    def test_string_filter_empty_result_shows_hint(self):
+        window = MainWindow()
+        try:
+            panel = window.file_panel
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "binary.bin")
+                with open(path, "wb") as f:
+                    f.write(b"\x00\x01\x02" * 100)
+                panel.load_file(path)
+            panel.string_filter.setText("")
+            panel._refresh_strings()
+            self.assertEqual(panel.string_table.rowCount(), 1)
+            self.assertIn("未提取到", panel.string_table.item(0, 1).text())
+            panel._on_string_click(0, 0)  # 提示行不应因缺少偏移而崩溃
+        finally:
+            window.close()
+
+    def test_hex_search_no_result_shows_friendly_hint(self):
+        window = MainWindow()
+        try:
+            viewer = window.file_panel.hex_viewer
+            viewer.set_data(b"hello world")
+            viewer.search_mode.setCurrentIndex(
+                viewer.search_mode.findData("ascii"))
+            viewer.search_edit.setText("not-found")
+            viewer._on_search()
+            self.assertEqual(viewer.match_label.text(), "未找到")
+            self.assertFalse(viewer.search_hint.isHidden())
+            self.assertIn("没有找到", viewer.search_hint.text())
+            viewer.search_edit.setText("hello")
+            viewer._on_search()
+            self.assertTrue(viewer.search_hint.isHidden())
+        finally:
+            window.close()
+
+    def test_hex_search_invalid_hex_shows_friendly_hint(self):
+        window = MainWindow()
+        try:
+            viewer = window.file_panel.hex_viewer
+            viewer.set_data(b"hello world hello")
+            viewer.search_mode.setCurrentIndex(
+                viewer.search_mode.findData("hex"))
+            viewer.search_edit.setText("68 65 6c 6c 6f")
+            viewer._on_search()
+            self.assertTrue(viewer.model._highlight_ranges)
+            viewer.search_edit.setText("GG")
+            viewer._on_search()
+            self.assertFalse(viewer.search_hint.isHidden())
+            self.assertIn("Hex 格式", viewer.search_hint.text())
+            self.assertEqual(viewer._matches, [])
+            self.assertEqual(viewer.model._highlight_ranges, [])
         finally:
             window.close()
 
@@ -960,6 +1106,33 @@ class FilePanelSmokeTests(unittest.TestCase):
             code.input_edit.setPlainText("int main(){return 0;}")
             code._on_format()
             self.assertIn("int main() {", code.output_edit.toPlainText())
+        finally:
+            window.close()
+
+    def test_jwt_ui_verify_signature(self):
+        window = MainWindow()
+        try:
+            jwt = window.jwt_panel
+            jwt.secret_edit.setPlainText("secret")
+            jwt.payload_edit.setPlainText('{"role":"admin"}')
+            jwt._on_generate()
+            token = jwt.generated_edit.toPlainText()
+            jwt.token_edit.setPlainText(token)
+            jwt._on_verify()
+            self.assertIn("验证通过", jwt.status.text())
+
+            parts = token.split(".")
+            bad_sig = ("A" if parts[2][:1] != "A" else "B") + parts[2][1:]
+            jwt.token_edit.setPlainText(
+                f"{parts[0]}.{parts[1]}.{bad_sig}")
+            jwt._on_verify()
+            self.assertIn("验证失败", jwt.status.text())
+
+            jwt.alg_combo.setCurrentIndex(jwt.alg_combo.findData("none"))
+            jwt._on_generate()
+            jwt.token_edit.setPlainText(jwt.generated_edit.toPlainText())
+            jwt._on_verify()
+            self.assertIn("验证通过", jwt.status.text())
         finally:
             window.close()
 

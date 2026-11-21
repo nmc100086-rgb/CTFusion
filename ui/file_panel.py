@@ -577,6 +577,19 @@ class FilePanel(QWidget):
             self.string_table.setItem(
                 0, 1, QTableWidgetItem(f"字符串扫描错误:{error}"))
             return
+        if not found:
+            self.string_table.setRowCount(1)
+            self.string_table.setItem(0, 0, QTableWidgetItem("提示"))
+            if self.string_filter.text().strip():
+                message = (
+                    "没有找到匹配的字符串。可以试试:缩短关键字;"
+                    "去掉正则特殊字符;或清空过滤框查看全部字符串。")
+            else:
+                message = (
+                    "未提取到可打印字符串。该文件可能是压缩/加密数据,"
+                    "或字符串长度都低于当前最小长度。")
+            self.string_table.setItem(0, 1, QTableWidgetItem(message))
+            return
         self.string_table.setRowCount(len(found))
         for row, (offset, text) in enumerate(found):
             item_off = QTableWidgetItem(f"0x{offset:X}")
@@ -646,7 +659,8 @@ class FilePanel(QWidget):
         if self._read_only:
             label += "  [只读]"
         self.file_label.setText(label)
-        self.hex_viewer.set_data(self._data, read_only=self._read_only)
+        self.hex_viewer.set_data(
+            self._data, read_only=self._read_only, preserve_search=True)
         self._refresh_header()
         if len(self._data) <= self.SYNC_ANALYSIS_BYTES:
             self._refresh_all()
@@ -663,8 +677,9 @@ class FilePanel(QWidget):
 
     def _on_string_click(self, row: int, _column: int) -> None:
         item = self.string_table.item(row, 0)
-        if item is not None:
-            self.hex_viewer.goto_offset(int(item.data(Qt.UserRole)))
+        offset = item.data(Qt.UserRole) if item is not None else None
+        if offset is not None:
+            self.hex_viewer.goto_offset(int(offset))
 
     # ---------------- 文件嵌套 ----------------
     def _reset_embedded(self) -> None:

@@ -254,24 +254,39 @@ def build_synthetic_zip(entry: zipcrack.ZipEntry,
     """Build a one-entry ZIP bkcrack can read, even for prefixed archives.
 
     The entry payload is the original encrypted bytes (including the 12-byte
-    ZipCrypto header); flags/CRC/sizes are copied so bkcrack can infer the
-    free check byte.
+    ZipCrypto header); flags/CRC/sizes/time are copied so bkcrack can infer the
+    same check byte as the original archive.  In particular, bit 3 archives
+    use the high byte of the DOS modification time as check byte, not the CRC
+    high byte, so bit 3 and the original time/date must be preserved.
     """
     if len(ciphertext) != entry.compressed_size:
         raise BkcrackError("密文长度与 ZIP 中央目录不一致")
     if entry.size > 0xFFFFFFFF or len(ciphertext) > 0xFFFFFFFF:
         raise BkcrackError("ZIP64 条目过大,拒绝构造临时 ZIP")
     name = b"cipher"
-    flags = (entry.flags | 1) & ~0x0008
+    flags = entry.flags | 1
     method = entry.method if entry.method in (0, 8) else 0
     crc = entry.crc & 0xFFFFFFFF
+    dos_time = entry.dos_time & 0xFFFF
+    dos_date = entry.dos_date & 0xFFFF
+    if flags & 0x08:
+        # 与 data descriptor 原始 ZIP 一致:本地头 CRC/大小留 0,
+        # 真实值只在中央目录中。
+        local_crc = 0
+        local_csize = 0
+        local_usize = 0
+    else:
+        local_crc = crc
+        local_csize = len(ciphertext)
+        local_usize = entry.size
     local = struct.pack(
-        "<IHHHHHIIIHH", 0x04034B50, 20, flags, method, 0, 0,
-        crc, len(ciphertext), entry.size, len(name), 0,
+        "<IHHHHHIIIHH", 0x04034B50, 20, flags, method, dos_time, dos_date,
+        local_crc, local_csize, local_usize, len(name), 0,
     ) + name + ciphertext
     central = struct.pack(
-        "<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, flags, method, 0, 0,
-        crc, len(ciphertext), entry.size, len(name), 0, 0, 0, 0, 0, 0,
+        "<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, flags, method,
+        dos_time, dos_date, crc, len(ciphertext), entry.size,
+        len(name), 0, 0, 0, 0, 0, 0,
     ) + name
     eocd = struct.pack(
         "<IHHHHIIH", 0x06054B50, 0, 0, 1, 1, len(central), len(local), 0)

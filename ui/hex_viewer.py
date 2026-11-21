@@ -301,6 +301,14 @@ class HexViewer(QWidget):
         bar.addStretch()
         layout.addLayout(bar)
 
+        self.search_hint = QLabel("")
+        self.search_hint.setWordWrap(True)
+        self.search_hint.setStyleSheet(
+            "color:#92400e; background:#fffbeb; border:1px solid #fde68a;"
+            "border-radius:8px; padding:6px 10px;")
+        self.search_hint.hide()
+        layout.addWidget(self.search_hint)
+
         self.model = HexTableModel()
         self.table = QTableView()
         self.table.setModel(self.model)
@@ -334,7 +342,10 @@ class HexViewer(QWidget):
         self._update_state()
 
     # ---------------- 数据 ----------------
-    def set_data(self, data: bytes, read_only: bool = False) -> None:
+    def set_data(self, data: bytes, read_only: bool = False,
+                 preserve_search: bool = False) -> None:
+        search_text = self.search_edit.text() if preserve_search else ""
+        search_mode = self.search_mode.currentData() if preserve_search else None
         self._data = data
         self._original_data = data
         self._read_only = read_only
@@ -351,8 +362,18 @@ class HexViewer(QWidget):
             "只读文件:双击修改会被拒绝,可使用「保存副本…」" if read_only else "")
         self._update_state()
         self.match_label.setText("")
+        self.search_hint.hide()
         self.model.set_data(data)
         self.inspector.setRowCount(0)
+        if preserve_search and search_text.strip():
+            index = self.search_mode.findData(search_mode)
+            if index >= 0:
+                self.search_mode.blockSignals(True)
+                self.search_mode.setCurrentIndex(index)
+                self.search_mode.blockSignals(False)
+                self._on_search_mode_changed()
+                self.search_edit.setText(search_text)
+            self._run_search(step=False)
 
     def clear(self) -> None:
         self.set_data(b"")
@@ -463,14 +484,44 @@ class HexViewer(QWidget):
         self._search_truncated = False
         self.model.clear_highlights()
         self.match_label.setText("")
+        self.search_hint.hide()
+
+    def _show_search_hint(self, text: str) -> None:
+        self.search_hint.setText(text)
+        self.search_hint.show()
+
+    def _match_status_text(self) -> str:
+        if not self._matches:
+            return "未找到" if self.search_edit.text().strip() else ""
+        suffix = (
+            f" (已达 {self.MAX_SEARCH_MATCHES:,} 条上限)"
+            if self._search_truncated else ""
+        )
+        if self._match_pos < 0:
+            return f"共 {len(self._matches)} 处命中{suffix}"
+        offset = self._matches[self._match_pos]
+        return (
+            f"第 {self._match_pos + 1}/{len(self._matches)} 处命中 "
+            f"@ 0x{offset:X}{suffix}"
+        )
 
     def _refresh_search_after_edit(self) -> None:
         """编辑/撤销后沿用当前搜索条件重新计算,而不是把搜索清空。"""
         if not self.search_edit.text().strip():
             self._clear_search()
             return
+        old_offset = (
+            self._matches[self._match_pos]
+            if 0 <= self._match_pos < len(self._matches) else None
+        )
         self._search_key = None
         self._run_search(step=False)
+        if old_offset is not None:
+            try:
+                self._match_pos = self._matches.index(old_offset)
+            except ValueError:
+                self._match_pos = -1
+            self.match_label.setText(self._match_status_text())
 
     # ---------------- 交互 ----------------
     def _on_goto(self) -> None:
@@ -542,7 +593,11 @@ class HexViewer(QWidget):
             return
         if self.apply_edit(offset, bytes([value])):
             self.goto_offset(offset)
-            self.match_label.setText(f"已修改 0x{offset:X}: 0x{old:02X} → 0x{value:02X}")
+            changed = f"已修改 0x{offset:X}: 0x{old:02X} → 0x{value:02X}"
+            search_status = self._match_status_text()
+            self.match_label.setText(
+                f"{changed}  |  搜索: {search_status}"
+                if search_status else changed)
 
     def _on_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
         if not current.isValid():
@@ -594,12 +649,20 @@ class HexViewer(QWidget):
         if not needle:
             self._clear_search()
             self.match_label.setText("请输入搜索内容")
+            self._show_search_hint(
+                "请输入要搜索的内容:ASCII 模式直接输入文本;"
+                "Hex 模式输入十六进制字节,例如 FF D8 FF。")
             return False
         if mode == "hex":
             try:
                 pattern = bytes.fromhex(needle)
             except ValueError:
-                self.match_label.setText("Hex 格式错误,示例:FF D8 FF")
+                # 非法 Hex 也要清掉上一次搜索的旧高亮,避免“提示错误但仍在高亮”。
+                self._clear_search()
+                self.match_label.setText("Hex 格式错误")
+                self._show_search_hint(
+                    "Hex 格式不正确:请输入偶数个十六进制字节,"
+                    "例如 FF D8 FF 或 FFD8FF。")
                 return False
             haystack = self._data
             target = pattern
@@ -611,6 +674,9 @@ class HexViewer(QWidget):
         if not pattern:
             self._clear_search()
             self.match_label.setText("请输入搜索内容")
+            self._show_search_hint(
+                "请输入要搜索的内容:ASCII 模式直接输入文本;"
+                "Hex 模式输入十六进制字节,例如 FF D8 FF。")
             return False
         matches: list[int] = []
         start = 0
@@ -630,15 +696,22 @@ class HexViewer(QWidget):
         self._search_key = (needle, mode, len(self._data))
         if matches:
             self.model.set_search_matches(matches, len(pattern))
-            capped = self._search_truncated
-            self.match_label.setText(
-                f"已显示前 {len(matches):,} 处命中(已达上限)"
-                if capped else f"共 {len(matches)} 处命中")
+            self.search_hint.hide()
+            self.match_label.setText(self._match_status_text())
             if step:
                 self._step(1, ensure=False)
             return True
         self.model.clear_highlights()
         self.match_label.setText("未找到")
+        if mode == "hex":
+            self._show_search_hint(
+                "没有找到匹配的字节。可以检查:字节是否完整;"
+                "是否漏掉或多了空格;试试切换 ASCII 模式搜索文本。")
+        else:
+            self._show_search_hint(
+                "没有找到匹配的文本。可以试试:切换 Hex 模式按字节搜索;"
+                "ASCII 搜索不区分大小写;确认搜索词没有多余空格;"
+                "确认文件已完整载入。")
         return False
 
     def _on_search(self) -> None:
@@ -656,15 +729,8 @@ class HexViewer(QWidget):
         if not self._matches:
             return
         self._match_pos = (self._match_pos + delta) % len(self._matches)
-        offset = self._matches[self._match_pos]
-        suffix = (
-            f" (已达 {self.MAX_SEARCH_MATCHES:,} 条上限)"
-            if self._search_truncated else ""
-        )
-        self.match_label.setText(
-            f"第 {self._match_pos + 1}/{len(self._matches)} 处 "
-            f"@ 0x{offset:X}{suffix}")
-        self.goto_offset(offset)
+        self.match_label.setText(self._match_status_text())
+        self.goto_offset(self._matches[self._match_pos])
         # 选中单元格的底色会盖住精确字节高亮,搜索跳转后只保留当前单元格。
         self.table.clearSelection()
 

@@ -55,6 +55,8 @@ class ZipEntry:
     size: int
     local_offset: int
     central_offset: int
+    dos_time: int = 0
+    dos_date: int = 0
     local_flags: int | None = None
     aes: bool = False
     pseudo: bool = False
@@ -149,11 +151,13 @@ def inspect(data: bytes) -> ZipInspect:
         elen = int.from_bytes(data[pos + 30:pos + 32], "little")
         clen = int.from_bytes(data[pos + 32:pos + 34], "little")
         lho = int.from_bytes(data[pos + 42:pos + 46], "little")
+        dos_time = int.from_bytes(data[pos + 12:pos + 14], "little")
+        dos_date = int.from_bytes(data[pos + 14:pos + 16], "little")
         name = _decode_name(data[pos + 46:pos + 46 + nlen], flags)
         extra_off = pos + 46 + nlen
         extra = data[extra_off:extra_off + elen]
         entry = ZipEntry(name, flags, method, crc, csize, usize,
-                         base + lho, pos)
+                         base + lho, pos, dos_time, dos_date)
         entry.aes = bool(flags & 1) and (method == 99 or _has_aes_extra(extra))
         if lho + 30 <= len(data) and data[lho:lho + 4] == _LOCAL:
             entry.local_flags = int.from_bytes(data[lho + 6:lho + 8], "little")

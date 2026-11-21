@@ -50,6 +50,11 @@ class JwtPanel(QWidget):
         self.btn_decode = QPushButton("解析")
         self.btn_decode.clicked.connect(self._on_decode)
         bar.addWidget(self.btn_decode)
+        self.btn_verify = QPushButton("验证签名")
+        self.btn_verify.setToolTip(
+            "使用右侧“密钥/私钥”输入框中的 HMAC 密钥或 RSA 公钥/私钥验证签名")
+        self.btn_verify.clicked.connect(self._on_verify)
+        bar.addWidget(self.btn_verify)
         self.btn_copy = QPushButton("复制 Token")
         self.btn_copy.clicked.connect(self._on_copy_token)
         bar.addWidget(self.btn_copy)
@@ -120,18 +125,24 @@ class JwtPanel(QWidget):
         self.payload_edit.setPlainText(
             json.dumps({"sub": "admin", "role": "admin"}, ensure_ascii=False, indent=2))
 
+    def _set_status(self, text: str, ok: bool | None = None) -> None:
+        self.status.setText(text)
+        color = "#888" if ok is None else ("#0a7a3d" if ok else "#b42318")
+        self.status.setStyleSheet(f"color:{color};")
+
     def _on_clear(self) -> None:
         self.token_edit.clear()
         self.header_view.clear()
         self.payload_view.clear()
         self.signature_view.clear()
         self.generated_edit.clear()
-        self.status.setText("已清空")
+        self._set_status("已清空")
 
     def _on_decode(self) -> None:
         try:
             decoded = jwt_tool.decode(self.token_edit.toPlainText())
         except jwt_tool.JwtError as e:
+            self._set_status("解析失败", False)
             QMessageBox.warning(self, "CTFusion", str(e))
             return
         self._decoded = decoded
@@ -144,7 +155,28 @@ class JwtPanel(QWidget):
         index = self.alg_combo.findData(alg)
         if index >= 0:
             self.alg_combo.setCurrentIndex(index)
-        self.status.setText("解析成功，可修改 Payload 后重新生成/伪造")
+        self._set_status("解析成功，可修改 Payload 后重新生成/伪造")
+
+    def _on_verify(self) -> None:
+        token = self.token_edit.toPlainText().strip()
+        if not token:
+            self._set_status("请先粘贴 JWT Token", False)
+            return
+        try:
+            decoded = jwt_tool.decode(token)
+        except jwt_tool.JwtError as e:
+            self._set_status("验证失败:Token 无法解析", False)
+            QMessageBox.warning(self, "CTFusion", str(e))
+            return
+        ok = jwt_tool.verify(token, self.secret_edit.toPlainText())
+        decoded.valid = ok
+        self._decoded = decoded
+        if ok:
+            self._set_status(
+                f"✓ 签名验证通过({decoded.header.get('alg', '?')})", True)
+        else:
+            self._set_status(
+                "✗ 签名验证失败，请检查密钥/公钥、算法或 Token 是否被篡改", False)
 
     def _on_generate(self) -> None:
         try:
@@ -162,12 +194,13 @@ class JwtPanel(QWidget):
             return
         self.generated_edit.setPlainText(token)
         self.token_edit.setPlainText(token)
-        self.status.setText(f"已生成 {alg} Token，签名长度 {len(token.split('.')[-1])}")
+        self._set_status(
+            f"已生成 {alg} Token，签名长度 {len(token.split('.')[-1])}")
 
     def _on_copy_token(self) -> None:
         QGuiApplication.clipboard().setText(self.token_edit.toPlainText())
-        self.status.setText("Token 已复制")
+        self._set_status("Token 已复制")
 
     def _on_copy_generated(self) -> None:
         QGuiApplication.clipboard().setText(self.generated_edit.toPlainText())
-        self.status.setText("生成结果已复制")
+        self._set_status("生成结果已复制")
