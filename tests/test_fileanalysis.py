@@ -164,10 +164,19 @@ def zip_bytes() -> bytes:
 
 
 def zipcrypto_bytes(password: str, content: bytes = b"hello misc",
-                    name: str = "flag.txt") -> bytes:
-    """构造一个最小 ZipCrypto 加密 ZIP,用于验证密码恢复。"""
+                    name: str = "flag.txt",
+                    data_descriptor: bool = False) -> bytes:
+    """构造一个最小 ZipCrypto 加密 ZIP,用于验证密码恢复。
+
+    ``data_descriptor=True`` 模拟 WinRAR 常见的 bit 3 流式写入:本地头
+    CRC/大小置零,真实值放在数据描述符和中央目录中,校验字节改用 DOS
+    时间高字节。
+    """
     name_raw = name.encode("utf-8")
     crc = zlib.crc32(content) & 0xFFFFFFFF
+    flags = 1 | (0x08 if data_descriptor else 0)
+    mod_time = 0x8218 if data_descriptor else 0
+    mod_date = 0x5D75 if data_descriptor else 0
     keys = [0x12345678, 0x23456789, 0x34567890]
     crc_table = []
     for value in range(256):
@@ -192,15 +201,23 @@ def zipcrypto_bytes(password: str, content: bytes = b"hello misc",
 
     for char in password.encode("utf-8"):
         update(char)
-    header = bytes([0] * 11 + [(crc >> 24) & 0xFF])
+    check_byte = ((mod_time >> 8) & 0xFF) if data_descriptor else ((crc >> 24) & 0xFF)
+    header = bytes([0] * 11 + [check_byte])
     encrypted = bytes(encrypt(byte) for byte in header + content)
     csize = len(encrypted)
     usize = len(content)
+    local_crc = 0 if data_descriptor else crc
+    local_csize = 0 if data_descriptor else csize
+    local_usize = 0 if data_descriptor else usize
+    descriptor = (struct.pack("<IIII", 0x08074B50, crc, csize, usize)
+                  if data_descriptor else b"")
 
-    local = struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 1, 0, 0, 0,
-                        crc, csize, usize, len(name_raw), 0) + name_raw + encrypted
-    central = struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, 1, 0, 0, 0,
-                          crc, csize, usize, len(name_raw), 0, 0, 0, 0, 0, 0) + name_raw
+    local = struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, flags, 0,
+                        mod_time, mod_date, local_crc, local_csize,
+                        local_usize, len(name_raw), 0) + name_raw + encrypted + descriptor
+    central = struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, flags, 0,
+                          mod_time, mod_date, crc, csize, usize,
+                          len(name_raw), 0, 0, 0, 0, 0, 0) + name_raw
     eocd = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 1, 1, len(central), len(local), 0)
     return local + central + eocd
 
@@ -473,6 +490,47 @@ class ZipCrackTests(unittest.TestCase):
         data = zipcrypto_bytes("a1")
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             self.assertEqual(zf.read("flag.txt", pwd=b"a1"), b"hello misc")
+
+    def test_zipcrypto_data_descriptor_recovery(self):
+        # WinRAR 默认流式写入 ZIP 时会设置 bit 3,本地头 CRC 为 0;
+        # 校验字节必须使用 DOS 时间高字节,不能再用 CRC 高字节。
+        data = zipcrypto_bytes("dd12", content=b"descriptor payload",
+                               name="dd.txt", data_descriptor=True)
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            self.assertEqual(zf.read("dd.txt", pwd=b"dd12"), b"descriptor payload")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "descriptor.zip")
+            with open(path, "wb") as f:
+                f.write(data)
+            wordlist = os.path.join(tmp, "words.txt")
+            with open(wordlist, "w", encoding="utf-8") as f:
+                f.write("wrong\ndd12\n")
+            result = zipcrack.recover_zip(zipcrack.CrackConfig(
+                path=path, mode="dictionary", wordlist=wordlist))
+            self.assertEqual(result.password, "dd12")
+            self.assertEqual(result.error, "")
+
+    def test_wordlist_auto_encoding_keeps_gbk_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "gbk.txt")
+            with open(path, "wb") as f:
+                f.write("密码\n1234\n".encode("gbk"))
+            self.assertEqual(
+                list(zipcrack._iter_wordlist(path, "auto")), ["密码", "1234"])
+            self.assertEqual(zipcrack._count_wordlist(path, "auto"), 2)
+
+    def test_zipcrypto_empty_entry_is_rejected(self):
+        data = zipcrypto_bytes("1234", content=b"", name="empty.txt",
+                               data_descriptor=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "empty.zip")
+            with open(path, "wb") as f:
+                f.write(data)
+            result = zipcrack.recover_zip(zipcrack.CrackConfig(
+                path=path, mode="brute", charset="0123456789",
+                min_length=4, max_length=4))
+            self.assertIsNone(result.password)
+            self.assertIn("非空", result.error)
 
     def test_bare_question_mask_is_alphanumeric(self):
         sets = zipcrack.parse_mask("qctf2026????")

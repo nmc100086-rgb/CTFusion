@@ -154,7 +154,7 @@ def inspect(data: bytes) -> ZipInspect:
         extra = data[extra_off:extra_off + elen]
         entry = ZipEntry(name, flags, method, crc, csize, usize,
                          base + lho, pos)
-        entry.aes = bool(flags & 1) and _has_aes_extra(extra)
+        entry.aes = bool(flags & 1) and (method == 99 or _has_aes_extra(extra))
         if lho + 30 <= len(data) and data[lho:lho + 4] == _LOCAL:
             entry.local_flags = int.from_bytes(data[lho + 6:lho + 8], "little")
             if bool(entry.local_flags & 1) != bool(flags & 1):
@@ -535,22 +535,30 @@ def _count_mask(mask: str, wildcard_chars: str = "") -> int:
     return total
 
 
-def _file_encoding(encoding: str) -> str:
-    return "utf-8" if encoding == "auto" else encoding
-
-
 def _iter_wordlist(path: str, encoding: str) -> Iterator[str]:
-    with open(path, "r", encoding=_file_encoding(encoding), errors="replace") as f:
+    if encoding == "auto":
+        # 字典文件本身可能是 UTF-8,也可能是 Windows 下常见的 GBK;
+        # 逐行尝试两种编码,避免 errors="replace" 把中文密码变成问号。
+        with open(path, "rb") as f:
+            for raw in f:
+                raw = raw.rstrip(b"\r\n")
+                text = None
+                for candidate in ("utf-8", "gbk"):
+                    try:
+                        text = raw.decode(candidate)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                yield text if text is not None else raw.decode("utf-8", "replace")
+        return
+    with open(path, "r", encoding=encoding, errors="replace") as f:
         for line in f:
             yield line.rstrip("\r\n")
 
 
 def _count_wordlist(path: str, encoding: str) -> int:
-    count = 0
-    with open(path, "r", encoding=_file_encoding(encoding), errors="replace") as f:
-        for _ in f:
-            count += 1
-    return count
+    with open(path, "rb") as f:
+        return sum(1 for _ in f)
 
 
 def _password_bytes(text: str, encoding: str) -> list[bytes]:
@@ -589,6 +597,7 @@ class _ZipCryptoChecker:
         self._payload = b""
         self._method = entry.compress_type
         self._crc = entry.CRC & 0xFFFFFFFF
+        self._check_byte = 0
         with open(path, "rb") as f:
             f.seek(entry.header_offset)
             local = f.read(30)
@@ -596,6 +605,14 @@ class _ZipCryptoChecker:
                 return
             nlen = int.from_bytes(local[26:28], "little")
             elen = int.from_bytes(local[28:30], "little")
+            # 带 data descriptor(bit 3)的 ZIP,本地头 CRC 可能为 0;
+            # 此时 ZipCrypto 的校验字节是 DOS 修改时间的高字节,
+            # 而不是中央目录 CRC 的高字节。Python zipfile 也这样判断。
+            if entry.flag_bits & 0x08:
+                local_time = int.from_bytes(local[10:12], "little")
+                self._check_byte = (local_time >> 8) & 0xFF
+            else:
+                self._check_byte = (entry.CRC >> 24) & 0xFF
             f.seek(entry.header_offset + 30 + nlen + elen)
             data = f.read(entry.compress_size)
         if len(data) < 12:
@@ -630,7 +647,7 @@ class _ZipCryptoChecker:
             return bytes(out)
 
         header = decrypt(self._header)
-        if header[-1] != ((self._crc >> 24) & 0xFF):
+        if header[-1] != self._check_byte:
             return False
         plain = decrypt(self._payload)
         try:
@@ -672,7 +689,22 @@ class ZipCracker:
             self._zf = None
             return "该 ZIP 使用 AES/WinZip 加密,Python zipfile 不支持;请改用 7-Zip 或 ARCHPR"
         infos = [info for info in infos if not self._has_aes(info)]
-        self._entry = min(infos, key=lambda item: (item.file_size, item.compress_size))
+        infos = [info for info in infos if not (info.flag_bits & 0x40)]
+        if not infos:
+            self._zf.close()
+            self._zf = None
+            return "该 ZIP 使用 Strong Encryption(bit 6),本工具只支持 ZipCrypto"
+        # 0 字节条目的 CRC 恒为 0,任何能通过 1 字节头校验的密码都会“成功”,
+        # 会产生假阳性;优先选择非空且确实含加密数据的条目来校验。
+        verifiable = [
+            info for info in infos
+            if info.file_size > 0 and info.compress_size > 12
+        ]
+        if not verifiable:
+            self._zf.close()
+            self._zf = None
+            return "没有可用于校验的非空加密条目(0 字节条目的 ZipCrypto 密码无法可靠验证)"
+        self._entry = min(verifiable, key=lambda item: (item.file_size, item.compress_size))
         try:
             self._fast = _ZipCryptoChecker(self.config.path, self._entry)
         except OSError:
@@ -681,7 +713,9 @@ class ZipCracker:
 
     @staticmethod
     def _has_aes(info: zipfile.ZipInfo) -> bool:
-        return _has_aes_extra(info.extra)
+        # WinZip AES 的标准方法是 99,通常同时带 0x9901 extra field;
+        # 两者任一出现都按 AES 处理,避免误选条目。
+        return info.compress_type == 99 or _has_aes_extra(info.extra)
 
     def _check(self, candidate: str) -> bytes | None:
         if self._zf is None or self._entry is None:

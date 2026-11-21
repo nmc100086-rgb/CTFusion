@@ -258,6 +258,14 @@ class ZipPanel(QWidget):
         layout.addWidget(self.progress)
         self.status = QLabel("载入 ZIP 后选择模式开始恢复;仅支持 ZipCrypto,不支持 AES。")
         layout.addWidget(self.status)
+        self.recovery_hint = QLabel(
+            "恢复不出来时依次检查:①「结构」页看是否 AES/WinZip(本工具不支持);"
+            "②密码是否确实在字典/掩码范围内;③中文密码把编码改为 GBK 或自动;"
+            "④掩码写 ???? 并在下拉菜单勾选字符集,?d/?l 固定写法已移除;"
+            "⑤0 字节加密条目无法可靠校验密码。")
+        self.recovery_hint.setWordWrap(True)
+        self.recovery_hint.setStyleSheet("color:#888; font-size:12px;")
+        layout.addWidget(self.recovery_hint)
 
         result_bar = QHBoxLayout()
         self.result_label = QLabel("密码:—")
@@ -359,7 +367,9 @@ class ZipPanel(QWidget):
 
         help_label = QLabel(
             "每个裸 ? 都使用上方下拉菜单多选的字符集;"
-            "?l/?u/?d 等固定写法已移除。字面问号请写 \\?。")
+            "?l/?u/?d 等固定写法已移除。"
+            "例如 4 位数字:掩码写 ????，下拉勾选“数字”。"
+            "字面问号请写 \\?。")
         help_label.setStyleSheet("color:#888;")
         help_label.setWordWrap(True)
         layout.addWidget(help_label)
@@ -428,6 +438,32 @@ class ZipPanel(QWidget):
         if self._worker is not None or self._extract_worker is not None:
             return
         mode = self.mode_combo.currentData() or "dictionary"
+        wildcard_chars = zipcrack.wildcard_charset(
+            self._selected_wildcard_codes())
+        if mode == "mask":
+            mask = self.mask_edit.text().strip()
+            if not mask:
+                QMessageBox.warning(
+                    self, "CTFusion",
+                    "掩码不能为空。\n\n"
+                    "例如 4 位数字密码:掩码写 ????，"
+                    "再在上方下拉菜单勾选“数字”。")
+                return
+            try:
+                zipcrack.parse_mask(mask, wildcard_chars)
+            except ValueError as e:
+                QMessageBox.warning(
+                    self, "CTFusion",
+                    f"{e}\n\n"
+                    "示例:4 位数字密码 → 掩码 ????，下拉勾选“数字”;"
+                    "4 位小写字母 → ????，下拉勾选“小写字母”。")
+                return
+        if mode == "dictionary" and not self.wordlist_edit.text().strip():
+            QMessageBox.warning(self, "CTFusion", "请先选择密码字典文件")
+            return
+        if mode == "brute" and not self.charset_edit.text():
+            QMessageBox.warning(self, "CTFusion", "暴力破解字符集不能为空")
+            return
         config = zipcrack.CrackConfig(
             path=self._path,
             mode=mode,
@@ -436,8 +472,7 @@ class ZipPanel(QWidget):
             min_length=self.min_length.value(),
             max_length=self.max_length.value(),
             mask=self.mask_edit.text(),
-            wildcard_chars=zipcrack.wildcard_charset(
-                self._selected_wildcard_codes()),
+            wildcard_chars=wildcard_chars,
             encoding=self.encoding_combo.currentData() or "utf-8",
         )
         self.recovery_log.clear()
@@ -517,9 +552,7 @@ class ZipPanel(QWidget):
                 path=self._path, error="恢复线程异常退出,未返回结果"))
         self._worker = None
         self.btn_stop.setEnabled(False)
-        has_encrypted = bool(
-            self._info and any(entry.flags & 1 for entry in self._info.entries))
-        self.btn_start.setEnabled(has_encrypted)
+        self.btn_start.setEnabled(bool(self._crackable_entries()))
 
     def _on_copy_password(self) -> None:
         if self._found_password:
@@ -557,6 +590,16 @@ class ZipPanel(QWidget):
         self._refresh()
         return True
 
+    def _crackable_entries(self) -> list[zipcrack.ZipEntry]:
+        if self._info is None:
+            return []
+        return [
+            entry for entry in self._info.entries
+            if (entry.flags & 1) and not entry.aes
+            and not (entry.flags & 0x40)
+            and entry.size > 0 and entry.compressed_size > 12
+        ]
+
     def _refresh(self) -> None:
         self._info = zipcrack.inspect(self._data)
         info = self._info
@@ -565,7 +608,16 @@ class ZipPanel(QWidget):
         self.btn_extract.setEnabled(bool(info.entries))
         self.btn_repair.setEnabled(any(entry.pseudo for entry in info.entries))
         encrypted = [entry for entry in info.entries if entry.flags & 1]
-        self.btn_start.setEnabled(bool(encrypted))
+        aes_entries = [entry for entry in encrypted if entry.aes]
+        zipcrypto_entries = [
+            entry for entry in encrypted
+            if not entry.aes and not (entry.flags & 0x40)
+        ]
+        crackable = [
+            entry for entry in zipcrypto_entries
+            if entry.size > 0 and entry.compressed_size > 12
+        ]
+        self.btn_start.setEnabled(bool(crackable))
         if hasattr(self, "result_label"):
             self.result_label.setText("密码:—")
             self.btn_copy_pwd.setEnabled(False)
@@ -604,9 +656,25 @@ class ZipPanel(QWidget):
                 self.log.appendPlainText(f"  - {entry.name}:{entry.reason}")
         else:
             self.log.appendPlainText("✓ 未发现伪加密条目")
-        if encrypted:
+        if crackable:
             self.log.appendPlainText(
-                f"检测到 {len(encrypted)} 个加密条目,可在「密码恢复」页签尝试 ZipCrypto 密码恢复。")
+                f"检测到 {len(crackable)} 个可校验的 ZipCrypto 条目,"
+                "可在「密码恢复」页签尝试字典/暴力/掩码恢复。")
+            self.status.setText(
+                "可尝试 ZipCrypto 密码恢复;只支持 ZipCrypto,不支持 AES。")
+        elif aes_entries:
+            self.log.appendPlainText(
+                f"⚠ 检测到 {len(aes_entries)} 个 AES/WinZip 加密条目。"
+                "本工具只支持 ZipCrypto;请用 7-Zip / WinRAR 输入密码解压,"
+                "或改用支持 AES 的工具(如 bkcrack 不支持 AES)。")
+            self.status.setText(
+                "检测到 AES/WinZip 加密,本工具只支持 ZipCrypto,无法恢复。")
+        elif zipcrypto_entries:
+            self.log.appendPlainText(
+                "⚠ 加密条目为空(0 字节)或压缩数据不足,"
+                "ZipCrypto 无法可靠校验密码,已禁用密码恢复。")
+            self.status.setText(
+                "加密条目为空,ZipCrypto 密码无法可靠验证。")
         # 额外调用一次结构解析,确保 EOCD/注释等异常也能记录到日志。
         nodes, end = fileparse.parse_zip(self._data)
         if nodes:
@@ -714,8 +782,7 @@ class ZipPanel(QWidget):
         if self._worker is not None and self._worker.isFinished():
             self._worker = None
             self.btn_stop.setEnabled(False)
-            self.btn_start.setEnabled(bool(
-                self._info and any(entry.flags & 1 for entry in self._info.entries)))
+            self.btn_start.setEnabled(bool(self._crackable_entries()))
         if self._extract_worker is not None and self._extract_worker.isFinished():
             self._on_extract_finished()
         if not self.crc_panel.shutdown() or not self.kpa_panel.shutdown():
