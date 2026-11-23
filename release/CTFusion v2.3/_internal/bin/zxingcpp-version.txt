@@ -1,0 +1,5 @@
+zxing-cpp 3.0.0 (Python binding: zxing-cpp 3.0.0, win_amd64)
+Source: https://github.com/zxing-cpp/zxing-cpp
+Python package: https://pypi.org/project/zxing-cpp/
+License: Apache License 2.0 (see zxingcpp-license.txt)
+Purpose: QR Code / Micro QR / Data Matrix / Aztec / PDF417 and 1D barcode decoding

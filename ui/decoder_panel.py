@@ -35,6 +35,7 @@ from core.sensitive import (
     CATEGORY_SECRET,
     CATEGORY_URL,
 )
+from ui import i18n
 from ui.highlight import (
     FLAG_BG,
     FLAG_FG,
@@ -54,6 +55,7 @@ class DecoderPanel(QWidget):
         self._raw_output: str = ""
         self._last_codec: CodecBase | None = None
         self._smart_hits: list = []
+        self._codecs = get_all()
         self._build_ui()
         self._on_codec_changed(0)
 
@@ -66,8 +68,9 @@ class DecoderPanel(QWidget):
         top.addWidget(QLabel("算法:"))
         self.combo = QComboBox()
         self.combo.setMinimumWidth(240)
-        for codec in get_all():
-            self.combo.addItem(f"{codec.category} | {codec.name}", codec)
+        for codec in self._codecs:
+            self.combo.addItem(
+                f"{i18n.tr(codec.category)} | {i18n.tr(codec.name)}", codec)
         self.combo.currentIndexChanged.connect(self._on_codec_changed)
         top.addWidget(self.combo)
 
@@ -185,6 +188,18 @@ class DecoderPanel(QWidget):
             self.hidden_label.show()
         else:
             self.hidden_label.hide()
+
+    def retranslate(self) -> None:
+        """语言切换后重建“分类 | 算法”显示；算法名保持原样。"""
+        current = self.combo.currentIndex()
+        self.combo.blockSignals(True)
+        self.combo.clear()
+        for codec in self._codecs:
+            self.combo.addItem(
+                f"{i18n.tr(codec.category)} | {i18n.tr(codec.name)}", codec)
+        if 0 <= current < self.combo.count():
+            self.combo.setCurrentIndex(current)
+        self.combo.blockSignals(False)
 
     # ---------------- 参数区动态刷新 ----------------
     def _current_codec(self) -> CodecBase:

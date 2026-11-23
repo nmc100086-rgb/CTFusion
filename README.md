@@ -1,7 +1,11 @@
-# CTFusion v2.2
+# CTFusion v2.3
 
-CTFusion 是一个基于 PySide6 的本地 CTF 综合工具箱，覆盖编码解码、文件分析、图片与音频隐写、ZIP 密码恢复 / CRC32 反查 / bkcrack 已知明文攻击、JWT 和代码格式化。工具离线运行，不依赖在线服务。
+CTFusion 是一个基于 PySide6 的本地 CTF 综合工具箱，覆盖编码解码、文件分析、图片与音频分析、ZIP 密码恢复 / CRC32 反查 / bkcrack 已知明文攻击、二维码识别、乱码修复、Base64/Hex 文件互转、JWT 和代码格式化。除可选的 GitHub 更新检查外，所有分析都在本地完成，不依赖在线服务。
 
+> **v2.3.1**：保存失败会写入本地日志；新增「帮助 → 保存权限自检…」和「设置 → 以管理员身份重新启动」，并提供 `以管理员身份运行.cmd`，用于在安全软件/权限拦截时获得完整写入权限。
+>
+> v2.3 新增 **多语言界面**（简体中文、英语、日语、韩语、西班牙语、法语、德语、俄语、葡萄牙语、阿拉伯语）、**左侧分组导航**、**GitHub 更新检查**、**二维码 / 条码扫描（结果可复制）**、**乱码自动修复与编码转换**、**Base64 / Hex 与图片、ZIP 等文件互转**、**文件属性查看**。界面中的第三方工具名称已改为通用功能名称；更新检查从 v2.3 起启用，只提示新版本并打开 GitHub，不自动下载。
+>
 > v2.2 ZIP 页签新增 **CRC 爆破** 与 **已知明文攻击 (KPA)**。KPA 是对 [kimci86/bkcrack](https://github.com/kimci86/bkcrack) 的二次封装，攻击算法由原作者实现，CTFusion 只负责准备数据、启动进程和展示结果。
 
 ## 主要功能
@@ -15,6 +19,18 @@ CTFusion 是一个基于 PySide6 的本地 CTF 综合工具箱，覆盖编码解
 - 字节级无损往返：无法显示的输出可使用“复制 Hex”取出原始字节。
 - JSFuck 默认禁止执行；界面必须显式确认风险，且有超时和输出大小限制。
 
+### 杂项工具（二维码 / 乱码 / Base64·Hex 文件）
+
+- **二维码 / 条码扫描**：基于 zxing-cpp，支持二维码、Micro QR、Data Matrix、Aztec、PDF417 和常见一维条码；可从文件、剪贴板或拖放读取图片。
+- 一张图片可包含多个条码，结果表格显示格式、内容预览、纠错级别和方向；选中后可复制文本、复制原始字节 Hex，或一次复制全部结果。
+- **乱码修复**：自动枚举 UTF-8 / GB18030 / GBK / Big5 / Latin-1 / CP1252 的错误解释组合，按可读性和中文常用字比例排序，双击候选填入结果。
+- 支持双层乱码（如 `Ã¤Â½...`）、GBK 被当 Latin-1、UTF-8 被当 GBK 等常见 CTF 场景；也支持手动“源编码 → 目标编码”转换和 Hex 字节输入。
+- QPlainTextEdit 会吞掉 U+00A0，本页使用 `QTextDocument.toRawText()` 保留原始字节，避免 UTF-8 被 Latin-1 解释后的乱码在输入阶段再次损坏。
+- **Base64 / Hex → 文件**：自动识别 Base64、Data URI、URL-safe Base64，以及带 `0x` / 空格 / 逗号分隔的 Hex；识别真实文件头后给出建议扩展名。
+- Base64 图片会直接预览；ZIP 等二进制可保存为文件，或“保存并分析”直接送进对应页签。十六进制转 ZIP 即“Hex → 文件 → 保存为 .zip”。
+- **文件 → Base64 / Hex**：任意文件转连续 Base64 或 Hex 文本，可复制或保存。
+- 解码输入和输出都有大小上限，避免误贴超大内容导致界面卡死。
+
 ### 文件分析
 
 - 根据 magic bytes 识别 40 多种格式，校验弱签名并检测扩展名伪造。
@@ -22,6 +38,8 @@ CTFusion 是一个基于 PySide6 的本地 CTF 综合工具箱，覆盖编码解
 - PNG/JPG/GIF/BMP/ZIP 结构解析；PNG 支持 Chunk、CRC 和尺寸修复。
 - 可编辑 Hex：搜索高亮、鼠标拖选字节、Ctrl+C / 右键复制（Hex 列复制 HEX，ASCII 列复制 ASCII 文本）、撤销/重做、覆盖保存和另存副本。
 - 字符串、熵图、MD5/SHA1/SHA256/CRC32。
+- **文件属性**页签：完整路径、真实路径、大小、创建/修改/访问时间（本地与 UTC）、Windows 只读/隐藏/系统/归档等属性、可读可写状态、MIME、真实类型和哈希；支持一键复制全部属性。
+- 菜单「文件 → 查看文件属性…」（`Alt+Enter`）可直接跳到当前文件的属性页。
 - 大文件分析在工作线程执行；界面先展示文件，再逐步填充哈希、字符串和结构结果。
 - Hex 搜索限制最大命中数量，并使用区间高亮，避免高频单字符搜索耗尽内存。
 
@@ -30,8 +48,10 @@ CTFusion 是一个基于 PySide6 的本地 CTF 综合工具箱，覆盖编码解
 - LSB 位平面、位序、多通道、起始像素、步长和最大长度。
 - LSB 行扫描，`FLAG{...}`、`CTF{...}`、`KEY{...}` 不区分大小写并优先高亮。
 - 原始索引色和 16-bit 像素处理，JPEG 有损提示。
-- PNG Chunk、CRC 修复、IDAT 宽高候选修复、EXIF、GIF 逐帧浏览。
-- StegSolve Data Extract、Image Combiner、Stereogram 和 Random Color Map。
+- PNG 数据块、CRC 修复、IDAT 宽高候选修复、EXIF、GIF 逐帧浏览。
+- 扩展分析：数据提取、图像合成、立体图和随机颜色映射。
+- 图片页右上角「识别二维码」会把当前图片直接送到实用工具，不必重新选文件。
+- 图片页的「通道 / 直方图」只保留通道预览、反色和直方图；异或、相加、相减、按位与、按位或、取小、取大和差分统一到「扩展分析 → 图像合成」，避免重复入口。
 - GIF 帧缓存有内存预算，避免大尺寸多帧文件无限占用内存。
 
 ### 音频 LSB
@@ -42,7 +62,7 @@ CTFusion 是一个基于 PySide6 的本地 CTF 综合工具箱，覆盖编码解
 ### ZIP 分析与密码恢复
 
 - 支持带前置垃圾数据的 ZIP，条目、注释、伪加密检测和修复均使用正确偏移。
-- 支持 WinRAR 常见的 bit 3 / data descriptor 流式 ZIP：密码恢复按 DOS 时间高字节校验；KPA 会保留 bit 3、DOS 时间和本地头零大小，保证 bkcrack 使用与原包一致的校验字节。
+- 支持部分压缩工具常见的 bit 3 / data descriptor 流式 ZIP：密码恢复按 DOS 时间高字节校验；KPA 会保留 bit 3、DOS 时间和本地头零大小，保证 bkcrack 使用与原包一致的校验字节。
 - ZipCrypto 字典、暴力和掩码恢复；显示进度、速度、ETA、停止和密码复制。
 - 掩码中的每个裸 `?` 都使用多选下拉菜单中的字符集：小写字母、大写字母、数字、大写 HEX、小写 HEX、特殊符号。
 - 选择“所有可打印字符”时会自动取消其他选项，不允许与其他字符集同时选择。
@@ -75,17 +95,35 @@ CTFusion 是一个基于 PySide6 的本地 CTF 综合工具箱，覆盖编码解
 - 严格校验 Base64URL 和 JSON 类型；Header、Payload 必须是 JSON 对象。
 - 支持 JSON、Python、JavaScript、HTML、CSS、C、C++、Java、PHP 格式化。
 
+## 多语言与更新检查
+
+- 支持 10 种界面语言：简体中文、英语、日语、韩语、西班牙语、法语、德语、俄语、葡萄牙语、阿拉伯语。
+- 可在左侧导航底部或「设置 → 语言」中切换；切换会立即应用到已打开界面，并保存选择。
+- 中文界面尽量使用中文功能名称；旧版界面中的第三方工具名已移除或改为通用功能名。`Base64`、`Hex`、`CRC`、`JWT`、`IHDR`、`IDAT` 等技术表示保留。
+- 阿拉伯语界面自动使用从右到左布局。
+- 更新检查从 **v2.3** 起启用；v2.3 之前的版本不会请求更新接口。
+- 启动后最多每 24 小时自动检查一次 GitHub 最新版本；也可以在「设置 → 检查更新…」手动检查。
+- 发现新版本时提示：`发现新版本，请到github官网更新，https://github.com/nmc100086-rgb/CTFusion`，并提供「打开 GitHub」按钮；不会自动下载或替换当前程序。
+- 更新检查只读取 GitHub 的公开 release / tag 信息；网络失败时自动检查保持静默，手动检查会给出错误提示。
+
 ## 界面与文件管理
 
-- 主窗口包含 7 个功能页签和顶部多文件栏。
+- 主窗口使用 **左侧分组导航**：文本处理、文件与压缩包、图像与音频、识别与转换。
+- 侧边栏可收起/展开（`Ctrl+B`），收起后内容区自动扩展，适合小屏幕或专注查看结果。
+- 顶部「☰」按钮、菜单「视图 → 显示侧边栏」都可以控制侧边栏。
+- `Ctrl+F` 打开当前页面查找栏，支持文本框、表格和树形结果；继续按 Enter 或「下一个」循环查找。
+- 查找不到时显示友好提示，并提示换关键词或切换到包含文本的页签；空页面会提示先打开文件。
+- 文件分析页的 Hex 区域获得焦点时，`Ctrl+F` 会优先聚焦 Hex 查看器自带的搜索框。
+- 主窗口包含 8 个功能页面和顶部多文件栏。
 - 文件分析、图片、音频和 ZIP 页面中的“打开文件”统一进入顶部文件栏。
 - 另存为或修复伪加密后，文件栏路径会同步更新。
 - 关闭最后一个文件页签时，会清空各分析页面的旧文件状态。
 - 切换文件时，不兼容的图片、音频和 ZIP 页面会被清空。
+- 对空输入、空结果、未载入文件、复制空内容、保存失败等常见操作补充了状态提示；查找无结果、乱码无候选、二维码无识别结果都会给出下一步建议。
 
 ## 安装与运行
 
-要求 Python 3.9+。
+要求 Python 3.9+。二维码识别需要 Pillow 与 zxing-cpp（已在 `requirements.txt` 中）。
 
 ```powershell
 pip install -r requirements.txt
@@ -93,6 +131,18 @@ python main.py
 ```
 
 源码运行时，KPA 会查找 `bin/bkcrack.exe`；该文件已随项目提供，无需额外安装。若缺失，界面会显示明确提示。
+
+### 第一次运行（只提示一次）
+
+- 第一次启动会显示一次「首次运行提示」，说明保存规则和 Windows 拦截的处理方式；之后不再出现。
+- 如果 Windows 弹出 **「Windows 已保护你的电脑」/「仍要运行」**（未签名程序的 SmartScreen 提示），点 **「更多信息」→「仍要运行」** 即可。同一个 exe 只会被拦截一次；如果每次重新下载/解压都被拦，先右键下载的 zip → 属性 → 勾选「解除锁定」，或运行压缩包里的 `首次运行-解除Windows拦截.cmd`（先 `Unblock-File` 再启动程序）。
+- 保存到 `D:\`、`C:\` 根目录或 `Program Files` 等受保护位置时，Windows 可能拒绝普通写入；此时程序会询问一次「以管理员身份保存 / 保存到用户文件夹 / 另存为」，选择后可以勾选「记住我的选择，不再询问」。
+- 如果仍然保存失败：
+  - 「帮助 → 保存权限自检…」会依次在桌面、文档、图片、下载、程序目录和临时目录各写一个临时文件，直接显示哪个位置失败、错误码是什么；
+  - 「帮助 → 打开保存日志」可查看 `%LOCALAPPDATA%\CTFusion\save.log`，里面记录了每次失败的目标路径、错误码和提权结果；
+  - 360、电脑管家、火绒等安全软件的「文档保护」会拦截未签名程序，请在它们的弹窗里选择「允许」或把本程序加入信任区；
+  - 「设置 → 以管理员身份重新启动」会用管理员权限重新打开程序；发布包里的 `以管理员身份运行.cmd` 效果相同。管理员模式下可以写入任何 Windows 允许的位置（UAC 每次启动确认一次，且无法接收从普通资源管理器拖入的文件）。
+- 保存日志只记录路径、错误码和权限状态，不记录文件内容。
 
 运行测试：
 
@@ -125,12 +175,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
 输出：
 
 ```text
-dist\CTFusion v2.2\CTFusion v2.2.exe
-dist\CTFusion v2.2\_internal\
-dist\CTFusion v2.2\_internal\bin\bkcrack.exe
+dist\CTFusion v2.3\CTFusion v2.3.exe
+dist\CTFusion v2.3\_internal\
+dist\CTFusion v2.3\_internal\bin\bkcrack.exe
 ```
 
-这是 PySide6/PyInstaller **onedir** 版本。分发时必须保留整个 `dist\CTFusion v2.2` 目录，不能只复制 EXE。构建脚本会检查 `bin\bkcrack.exe` 是否存在，并用 `--self-test` 验证打包后的 bkcrack 与 CRC 反查。
+这是 PySide6/PyInstaller **onedir** 版本。分发时必须保留整个 `dist\CTFusion v2.3` 目录，不能只复制 EXE。构建脚本会检查 `bin\bkcrack.exe` 是否存在，并用 `--self-test` 验证打包后的 bkcrack、CRC 反查、Hex→ZIP、乱码修复、二维码识别和更新检查基础逻辑；同时在输出目录生成 `首次运行-解除Windows拦截.cmd`（第一次运行解除“下载文件”标记并启动）和 `以管理员身份运行.cmd`（以完整权限启动，便于写入受保护位置）。
 
 ## 项目结构
 
@@ -145,24 +195,37 @@ CTFusion/
 │   ├── bkcrack.exe              # 第三方程序,打包后位于 _internal/bin
 │   ├── bkcrack-license.txt      # 原作者 zlib 许可证
 │   ├── bkcrack-readme.md        # 原作者说明
-│   └── bkcrack-version.txt      # 版本 / 来源 / SHA-256
+│   ├── bkcrack-version.txt      # 版本 / 来源 / SHA-256
+│   ├── zxingcpp-license.txt     # zxing-cpp Apache-2.0
+│   ├── zxingcpp-version.txt
+│   ├── Pillow-license.txt       # Pillow HPND
+│   └── Pillow-version.txt
 ├── core/
 │   ├── codecs/
 │   ├── analysis.py
 │   ├── bkcrack.py               # bkcrack KPA 子进程封装
 │   ├── chain.py
+│   ├── datatools.py             # Base64 / Hex <-> 文件
+│   ├── fileprops.py             # 文件属性
 │   ├── fileparse.py
 │   ├── filetype.py
 │   ├── jwt_tool.py
+│   ├── mojibake.py              # 乱码检测 / 修复 / 编码转换
+│   ├── qrcode.py                # zxing-cpp 二维码封装
 │   ├── sensitive.py
 │   ├── lsb.py
+│   ├── updater.py               # GitHub 版本检查
+│   ├── version.py               # 版本号 / 更新起始版本
 │   └── zipcrack.py              # ZIP 结构 / ZipCrypto / CRC32 反查
 ├── ui/
 │   ├── main_window.py
 │   ├── decoder_panel.py
 │   ├── file_panel.py
 │   ├── image_panel.py
+│   ├── image_analysis_panel.py  # 数据提取 / 图像合成 / 立体图 / 颜色映射
 │   ├── audio_panel.py
+│   ├── misc_panel.py            # 二维码 / 乱码 / Base64·Hex 文件
+│   ├── i18n.py                  # 多语言界面
 │   ├── zip_panel.py
 │   ├── zip_attack_panels.py     # CRC 爆破 / KPA 页签
 │   └── hex_viewer.py
@@ -180,20 +243,46 @@ CTFusion/
 - CRC 爆破有 1 MiB ZIP、6 字节明文、65,536 候选和后台线程限制；只做只读计算。
 - KPA 只调用随包发布的 `bkcrack.exe`，使用固定参数和子进程参数数组，不经过 shell；条目名不进入命令行；临时目录结束后删除。
 - 运行 KPA 前会检查 bkcrack 是否存在、大小是否正常，并记录 SHA-256；版本不符时仅提示，不下载、不联网。
-- 本工具不会联网；除 JSFuck 调用的本机 Node.js 和本地 bkcrack.exe 外，所有分析均在本地完成。
+- 二维码识别在本地完成，不调用在线 API；图片最多解码 1.2 亿像素，图片文件上限 128 MB。
+- Base64/Hex 解码上限 128 MB；保存前先识别 magic，不会自动执行解码出的文件。
+- 保存位置由用户决定：解码结果、LSB 提取数据、图片/PNG/ZIP 修复结果、内嵌文件等都可以保存到任意可选位置，包括其他磁盘、磁盘根目录和程序所在目录。
+- 只有当 Windows 真正拒绝写入时，程序才会请求一次管理员权限（UAC），并且只写入用户选定的文件；用户也可以改为保存到图片/下载/文档文件夹，并选择「记住我的选择，不再询问」。
+- 每次提权写入都需要在 Windows 的 UAC 窗口中确认一次（系统安全机制）；保存到普通文件夹不会触发提权，也不会出现 UAC。
+- 程序不会在后台静默写入用户没有选择的路径，不会修改系统 ACL，也不会常驻管理员权限；提权进程写完一个（批）文件后立即退出。
+- 乱码修复只是枚举候选并按可读性排序，不会执行文本；若字节已经被替换字符（`�`）覆盖，原始内容无法恢复。
+- 更新检查只向 GitHub 公开 API 读取 release / tag 信息，不发送文件、路径或分析内容；不自动下载，也不会执行远端文件。
+- 除更新检查、JSFuck 调用的本机 Node.js 和本地 bkcrack.exe 外，所有分析均在本地完成。
 
 ## 已知限制
 
-- ZIP 密码恢复 / CRC 反查 / KPA 只支持 ZipCrypto，不支持 AES/WinZip、RAR 或 7z。
+- ZIP 密码恢复 / CRC 反查 / KPA 只支持 ZipCrypto，不支持 AES、RAR 或 7z。
 - CRC 反查只适用于极小条目（≤ 6 字节）；更大的条目请使用字典、掩码或 bkcrack。
 - Deflate 条目的 bkcrack 已知明文必须是压缩后的字节，且压缩级别 / 压缩器需与原 ZIP 一致；CTFusion 提供按 1~9 级重新压缩的辅助，但不能保证匹配所有压缩器。
 - bkcrack 可能被部分杀毒软件误报为黑客工具；这是第三方程序的常见误报，请在可信环境中使用。
 - 带前置垃圾数据的 ZIP 可以攻击单条目；`移除密码另存` / `修改密码另存` 依赖 bkcrack 对整包的重建，非标准偏移可能失败，此时请使用“解密当前条目”。
 - EXIF 覆盖常用标签，不包含完整厂商私有标签、XMP 和 ICC。
-- Stereogram 是简化实现，复杂立体图建议使用 StegSolve。
-- 工具不内置 PCAP 深度分析、PDF/Office 引擎、OCR 或二维码解码。
+- 立体图解析是简化实现，复杂立体图可尝试调整偏移范围。
+- 二维码 / 条码识别依赖 zxing-cpp；极端低分辨率、强透视或大面积遮挡的码可能无法识别。
+- 乱码修复提供候选排序，不保证百分之百还原；如果原文已经写入 `�` 或经过有损转换，缺失字节无法凭空恢复。
+- 工具不内置 PCAP 深度分析、PDF/Office 引擎或 OCR。
 
 ## 第三方组件与致谢
+
+### zxing-cpp
+
+- 项目：[zxing-cpp/zxing-cpp](https://github.com/zxing-cpp/zxing-cpp)
+- Python 包：`zxing-cpp 3.0.0`
+- 许可证：Apache License 2.0，全文见 `bin/zxingcpp-license.txt`
+- 用途：二维码、Micro QR、Data Matrix、Aztec、PDF417 和常见一维条码识别
+
+CTFusion 只负责读取图片、调用 zxing-cpp 并展示结果；条码检测与解码算法由 zxing-cpp 完成。
+
+### Pillow
+
+- 项目：[python-pillow/Pillow](https://github.com/python-pillow/Pillow)
+- 版本：`12.1.0`
+- 许可证：HPND，全文见 `bin/Pillow-license.txt`
+- 用途：二维码扫描前的图片解码与尺寸检查
 
 ### bkcrack
 

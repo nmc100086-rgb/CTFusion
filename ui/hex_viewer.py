@@ -557,11 +557,9 @@ class HexViewer(QWidget):
             self.dataEdited.emit()
 
     def save_to(self, path: str) -> bool:
-        try:
-            with open(path, "wb") as f:
-                f.write(self._data)
-        except OSError as e:
-            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
+        from ui import save_utils
+
+        if not save_utils.write_bytes(self, self._data, path):
             return False
         self._original_data = self._data
         self._modified = False

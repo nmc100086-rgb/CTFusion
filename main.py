@@ -47,6 +47,8 @@ _prepare_windows_qt_runtime()
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from core.version import __version__
+from ui import i18n
 from ui.main_window import MainWindow
 
 
@@ -60,7 +62,7 @@ def _self_test() -> int:
     """Headless build check: bundled bkcrack + CRC32 inversion."""
     import zlib
 
-    from core import bkcrack, zipcrack
+    from core import bkcrack, datatools, mojibake, qrcode, updater, zipcrack
 
     info = bkcrack.bkcrack_info()
     print(f"bkcrack: {info.version or 'missing'} ({info.path})")
@@ -73,6 +75,28 @@ def _self_test() -> int:
     if content not in solved.candidates:
         print("ERROR: CRC32 inversion failed")
         return 1
+
+    payload = datatools.decode_payload("504b0304", "hex")
+    if payload.kind != "ZIP":
+        print(f"ERROR: hex->ZIP check failed ({payload.kind})")
+        return 1
+    garbled = "测试".encode("utf-8").decode("latin-1")
+    repaired = mojibake.repair(garbled)
+    if repaired is None or repaired.text != "测试":
+        print("ERROR: mojibake repair failed")
+        return 1
+    qr_ok, qr_message = qrcode.self_test()
+    print(f"QR: {qr_message}")
+    if not qr_ok:
+        print("ERROR: QR self-test failed")
+        return 1
+    if updater.parse_version("v2.3.1") != (2, 3, 1):
+        print("ERROR: version parser failed")
+        return 1
+    if not updater.check_for_update((2, 2, 0)).ignored:
+        print("ERROR: update check should be ignored before v2.3")
+        return 1
+    print(f"version: {__version__}")
     print("OK")
     return 0
 
@@ -80,9 +104,16 @@ def _self_test() -> int:
 def main() -> int:
     if "--self-test" in sys.argv:
         return _self_test()
+    # 提权辅助进程：只做一次文件写入，不创建 QApplication，也不显示界面。
+    # 由 ui.save_utils 在 Windows 拒绝普通写入时通过 ShellExecuteW("runas") 启动。
+    from core.elevate import ELEVATED_FLAG, run_elevated_task
+    if ELEVATED_FLAG in sys.argv:
+        return run_elevated_task(sys.argv)
     app = QApplication(sys.argv)
     app.setApplicationName("CTFusion")
-    app.setApplicationVersion("2.2.0")
+    app.setOrganizationName("CTFusion")
+    app.setApplicationVersion(__version__)
+    i18n.initialize()
     icon_path = resource_path("assets/CTFusion.png")
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))

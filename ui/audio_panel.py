@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from core import audio
 from core.filetype import identify
+from ui import save_utils
 from ui.highlight import install_flag_highlighter
 
 
@@ -69,8 +70,8 @@ class AudioPanel(QWidget):
         opts.addWidget(self.bit_combo)
         opts.addWidget(QLabel("位序:"))
         self.order_combo = QComboBox()
-        self.order_combo.addItem("MSB-first", "msb")
-        self.order_combo.addItem("LSB-first", "lsb")
+        self.order_combo.addItem("高位优先 (MSB)", "msb")
+        self.order_combo.addItem("低位优先 (LSB)", "lsb")
         opts.addWidget(self.order_combo)
         opts.addWidget(QLabel("最多字节:"))
         self.max_spin = QSpinBox()
@@ -87,7 +88,7 @@ class AudioPanel(QWidget):
         opts.addStretch()
         layout.addLayout(opts)
 
-        self.status = QLabel("WAV LSB:每个采样点取指定 bit")
+        self.status = QLabel("WAV LSB：每个采样点取指定的二进制位")
         layout.addWidget(self.status)
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
@@ -156,11 +157,12 @@ class AudioPanel(QWidget):
         self.channel_combo.clear()
         self.bit_combo.clear()
         self.output.clear()
-        self.status.setText("WAV LSB:每个采样点取指定 bit")
+        self.status.setText("WAV LSB：每个采样点取指定的二进制位")
         self.btn_save.setEnabled(False)
 
     def _on_extract(self) -> None:
         if not self._data or self._info is None:
+            self.status.setText("请先载入 WAV 文件，再提取 LSB 数据。")
             return
         self._extracted = audio.extract_lsb(
             self._payload,
@@ -177,15 +179,12 @@ class AudioPanel(QWidget):
 
     def _on_save(self) -> None:
         if not self._extracted:
+            self.status.setText("当前没有可保存的提取结果，请先提取 LSB 数据。")
             return
         base = os.path.splitext(self._path)[0] or "wav_lsb"
         path, _ = QFileDialog.getSaveFileName(self, "保存提取数据", base + "_lsb.bin")
         if not path:
             return
-        try:
-            with open(path, "wb") as f:
-                f.write(self._extracted)
-        except OSError as e:
-            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
+        if not save_utils.write_bytes(self, self._extracted, path):
             return
         QMessageBox.information(self, "CTFusion", f"已保存 {len(self._extracted):,} 字节:\n{path}")

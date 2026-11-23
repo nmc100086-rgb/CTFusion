@@ -94,6 +94,9 @@ class CodePanel(QWidget):
                 self.lang_combo.setCurrentIndex(index)
 
     def _on_format(self) -> None:
+        if not self.input_edit.toPlainText().strip():
+            self.status.setText("请先粘贴代码或打开代码文件，再点击格式化。")
+            return
         language = self.lang_combo.currentData() or "JSON"
         try:
             result = codefmt.format_code(self.input_edit.toPlainText(), language)
@@ -104,5 +107,9 @@ class CodePanel(QWidget):
         self.status.setText(f"已格式化:{language}")
 
     def _on_copy(self) -> None:
-        QGuiApplication.clipboard().setText(self.output_edit.toPlainText())
+        text = self.output_edit.toPlainText()
+        if not text:
+            self.status.setText("当前没有可复制的结果，请先完成格式化。")
+            return
+        QGuiApplication.clipboard().setText(text)
         self.status.setText("结果已复制")

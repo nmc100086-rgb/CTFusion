@@ -29,7 +29,8 @@ from core import fileparse
 from core import imagetools, lsb
 from core.filetype import identify
 from ui.highlight import install_flag_highlighter, mark_item
-from ui.stegsolve_panel import StegSolvePanel
+from ui.image_analysis_panel import ImageAnalysisPanel
+from ui import save_utils
 
 _GIF_MAX_FRAMES = 500
 
@@ -53,6 +54,7 @@ class ImagePanel(QWidget):
     """图片隐写页签。"""
 
     openRequested = Signal(str)
+    qrRequested = Signal(str)
     PNG_DEEP_ANALYSIS_LIMIT = 16 * 1024 * 1024
     GIF_CACHE_LIMIT = 256 * 1024 * 1024
 
@@ -85,6 +87,11 @@ class ImagePanel(QWidget):
         bar.addWidget(self.btn_open)
         self.file_label = QLabel("拖入图片开始分析")
         bar.addWidget(self.file_label, 1)
+        self.btn_qr = QPushButton("识别二维码")
+        self.btn_qr.setToolTip("把当前图片送到「杂项工具 → 二维码 / 条码」识别")
+        self.btn_qr.setEnabled(False)
+        self.btn_qr.clicked.connect(self._request_qr)
+        bar.addWidget(self.btn_qr)
         layout.addLayout(bar)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -99,10 +106,10 @@ class ImagePanel(QWidget):
         self.tabs.addTab(self._build_lsb(), "LSB 隐写")
         self.tabs.addTab(self._build_row_scan(), "LSB 行信息")
         self.tabs.addTab(self._build_repair(), "图片修复")
-        self.tabs.addTab(self._build_chunks(), "PNG Chunk")
-        self.tabs.addTab(self._build_tools(), "图像工具")
-        self.stegsolve = StegSolvePanel()
-        self.tabs.addTab(self.stegsolve, "StegSolve")
+        self.tabs.addTab(self._build_chunks(), "PNG 数据块")
+        self.tabs.addTab(self._build_tools(), "通道 / 直方图")
+        self.image_analysis = ImageAnalysisPanel()
+        self.tabs.addTab(self.image_analysis, "扩展分析")
         self.tabs.addTab(self._build_exif(), "EXIF")
         self.tabs.addTab(self._build_frames(), "GIF 帧")
         splitter.addWidget(self.tabs)
@@ -137,8 +144,8 @@ class ImagePanel(QWidget):
         bar.addWidget(self.lsb_bit)
         bar.addWidget(QLabel("位序:"))
         self.lsb_order = QComboBox()
-        self.lsb_order.addItem("MSB-first", "msb")
-        self.lsb_order.addItem("LSB-first", "lsb")
+        self.lsb_order.addItem("高位优先 (MSB)", "msb")
+        self.lsb_order.addItem("低位优先 (LSB)", "lsb")
         bar.addWidget(self.lsb_order)
         self.btn_bitplane = QPushButton("显示位平面")
         self.btn_bitplane.clicked.connect(self._on_bitplane)
@@ -221,8 +228,8 @@ class ImagePanel(QWidget):
         bar.addWidget(self.row_bit)
         bar.addWidget(QLabel("位序:"))
         self.row_order = QComboBox()
-        self.row_order.addItem("MSB-first", "msb")
-        self.row_order.addItem("LSB-first", "lsb")
+        self.row_order.addItem("高位优先 (MSB)", "msb")
+        self.row_order.addItem("低位优先 (LSB)", "lsb")
         bar.addWidget(self.row_order)
         bar.addWidget(QLabel("模式:"))
         self.row_mode = QComboBox()
@@ -281,7 +288,7 @@ class ImagePanel(QWidget):
         layout.addWidget(self.repair_hint)
 
         self.crc_table = QTableWidget(0, 4)
-        self.crc_table.setHorizontalHeaderLabels(["Chunk", "偏移", "存储 CRC", "实际 CRC"])
+        self.crc_table.setHorizontalHeaderLabels(["数据块", "偏移", "存储 CRC", "实际 CRC"])
         self.crc_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.crc_table.verticalHeader().setVisible(False)
         self.crc_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -324,9 +331,9 @@ class ImagePanel(QWidget):
         page = QWidget()
         layout = QVBoxLayout(page)
         bar = QHBoxLayout()
-        self.chunk_hint = QLabel("仅 PNG 支持 Chunk 列表与文本块提取")
+        self.chunk_hint = QLabel("仅 PNG 支持数据块列表与文本块提取")
         bar.addWidget(self.chunk_hint, 1)
-        self.btn_export_chunks = QPushButton("导出文本 Chunk…")
+        self.btn_export_chunks = QPushButton("导出文本数据块…")
         self.btn_export_chunks.clicked.connect(self._on_export_chunks)
         self.btn_export_chunks.setEnabled(False)
         bar.addWidget(self.btn_export_chunks)
@@ -334,7 +341,7 @@ class ImagePanel(QWidget):
 
         self.chunk_table = QTableWidget(0, 5)
         self.chunk_table.setHorizontalHeaderLabels(
-            ["Chunk", "偏移", "大小", "CRC", "内容"])
+            ["数据块", "偏移", "大小", "CRC", "内容"])
         self.chunk_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.chunk_table.verticalHeader().setVisible(False)
         self.chunk_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -346,13 +353,13 @@ class ImagePanel(QWidget):
         self.chunk_table.setRowCount(0)
         self._text_chunks: list[fileparse.PngText] = []
         if self._kind != "PNG":
-            self.chunk_hint.setText("仅 PNG 支持 Chunk 列表与文本块提取")
+            self.chunk_hint.setText("仅 PNG 支持数据块列表与文本块提取")
             self.btn_export_chunks.setEnabled(False)
             return
         chunks = fileparse.png_chunks(self._payload)
         texts = {item.offset: item for item in fileparse.png_text_chunks(self._payload)}
         self._text_chunks = list(texts.values())
-        self.chunk_hint.setText(f"共 {len(chunks)} 个 chunk,其中 {len(texts)} 个文本/EXIF 块")
+        self.chunk_hint.setText(f"共 {len(chunks)} 个数据块，其中 {len(texts)} 个文本/EXIF 块")
         self.chunk_table.setRowCount(len(chunks))
         for row, chunk in enumerate(chunks):
             text = texts.get(chunk.offset)
@@ -381,18 +388,16 @@ class ImagePanel(QWidget):
             return
         base, _ = os.path.splitext(self._path)
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出文本 Chunk", (base or "png") + "_chunks.txt",
+            self, "导出文本数据块", (base or "png") + "_chunks.txt",
             "文本 (*.txt)")
         if not path:
             return
         lines = []
         for item in self._text_chunks:
             lines.append(f"[{item.chunk}] {item.keyword}\n{item.text}\n")
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines))
-        except OSError as e:
-            QMessageBox.warning(self, "CTFusion", f"导出失败:{e}")
+        text = "\n".join(lines)
+        if not save_utils.write_bytes(
+                self, text.encode("utf-8"), path, "text"):
             return
         QMessageBox.information(self, "CTFusion", f"已导出:\n{path}")
 
@@ -411,12 +416,6 @@ class ImagePanel(QWidget):
         self.btn_invert = QPushButton("反色")
         self.btn_invert.clicked.connect(self._on_invert)
         bar.addWidget(self.btn_invert)
-        self.btn_xor = QPushButton("与另一张图 XOR…")
-        self.btn_xor.clicked.connect(self._on_xor)
-        bar.addWidget(self.btn_xor)
-        self.btn_diff = QPushButton("差分…")
-        self.btn_diff.clicked.connect(self._on_difference)
-        bar.addWidget(self.btn_diff)
         self.btn_hist = QPushButton("直方图")
         self.btn_hist.clicked.connect(self._on_histogram)
         bar.addWidget(self.btn_hist)
@@ -426,8 +425,15 @@ class ImagePanel(QWidget):
         bar.addWidget(self.btn_save_tool)
         bar.addStretch()
         layout.addLayout(bar)
+        note = QLabel(
+            "异或 / 相加 / 相减 / 按位与 / 按位或 / 取小 / 取大 / 差分 已统一到 "
+            "「扩展分析 → 图像合成」，避免重复入口；"
+            "本页保留通道预览、反色和直方图。")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#8a8a8a;")
+        layout.addWidget(note)
 
-        self.tool_preview = QLabel("通道 / XOR / 差分结果预览")
+        self.tool_preview = QLabel("通道 / 反色 / 直方图结果预览")
         self.tool_preview.setAlignment(Qt.AlignCenter)
         self.tool_preview.setStyleSheet("background:#1b1b1b;color:#888;")
         layout.addWidget(self.tool_preview, 1)
@@ -441,13 +447,12 @@ class ImagePanel(QWidget):
 
     def _refresh_tools(self) -> None:
         enabled = self._image is not None
-        for button in (self.btn_channel, self.btn_invert, self.btn_xor,
-                       self.btn_diff, self.btn_hist):
+        for button in (self.btn_channel, self.btn_invert, self.btn_hist):
             button.setEnabled(enabled)
         self._tool_image = None
         self.btn_save_tool.setEnabled(False)
         self.tool_preview.setPixmap(QPixmap())
-        self.tool_preview.setText("通道 / XOR / 差分结果预览")
+        self.tool_preview.setText("通道 / 反色 / 直方图结果预览")
         self.tool_log.clear()
 
     def _show_tool_image(self, image: QImage, note: str) -> None:
@@ -468,48 +473,6 @@ class ImagePanel(QWidget):
             return
         self._show_tool_image(imagetools.invert(self._image), "RGB 反色")
 
-    def _other_image(self) -> QImage | None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择另一张图", "",
-            "图片 (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff)")
-        if not path:
-            return None
-        try:
-            with open(path, "rb") as f:
-                data = f.read()
-        except OSError as e:
-            QMessageBox.warning(self, "CTFusion", f"读取失败:{e}")
-            return None
-        image = QImage.fromData(data)
-        if image.isNull():
-            QMessageBox.warning(self, "CTFusion", "无法解码该图片")
-            return None
-        return image
-
-    def _on_xor(self) -> None:
-        if self._image is None:
-            return
-        other = self._other_image()
-        if other is None:
-            return
-        result = imagetools.xor_images(self._image, other)
-        if result is None:
-            QMessageBox.warning(self, "CTFusion", "两张图片尺寸必须相同")
-            return
-        self._show_tool_image(result, "XOR 结果(相同像素为黑)")
-
-    def _on_difference(self) -> None:
-        if self._image is None:
-            return
-        other = self._other_image()
-        if other is None:
-            return
-        result = imagetools.difference(self._image, other)
-        if result is None:
-            QMessageBox.warning(self, "CTFusion", "两张图片尺寸必须相同")
-            return
-        self._show_tool_image(result, "差分结果(|A-B|)")
-
     def _on_histogram(self) -> None:
         if self._image is None:
             return
@@ -526,8 +489,12 @@ class ImagePanel(QWidget):
             self, "保存图像结果", (base or "image") + "_tool.png", "PNG (*.png)")
         if not path:
             return
-        if not self._tool_image.save(path, "PNG"):
+        buffer = QBuffer()
+        buffer.open(QIODevice.WriteOnly)
+        if not self._tool_image.save(buffer, "PNG"):
             QMessageBox.warning(self, "CTFusion", "保存失败")
+            return
+        if not save_utils.write_bytes(self, bytes(buffer.data()), path, "image"):
             return
         self.tool_log.appendPlainText(f"已保存:{path}")
 
@@ -566,6 +533,10 @@ class ImagePanel(QWidget):
         if path:
             self.openRequested.emit(path)
 
+    def _request_qr(self) -> None:
+        if self._path:
+            self.qrRequested.emit(self._path)
+
     def load_file(self, path: str) -> bool:
         try:
             with open(path, "rb") as f:
@@ -579,12 +550,13 @@ class ImagePanel(QWidget):
         self._prefix = result.prefix
         self._payload = data[result.prefix:]
         self._kind = result.real_name
+        self.btn_qr.setEnabled(True)
         label = f"{self._path}  ({len(data):,} 字节)  |  {self._kind}"
         if self._prefix:
             label += f"  [前置数据 {self._prefix} 字节]"
         self.file_label.setText(label)
         self._load_image()
-        self.stegsolve.set_image(self._image)
+        self.image_analysis.set_image(self._image)
         self._refresh_info()
         self._refresh_repair()
         self._refresh_chunks()
@@ -804,11 +776,7 @@ class ImagePanel(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "保存提取数据", base + "_lsb.bin")
         if not path:
             return
-        try:
-            with open(path, "wb") as f:
-                f.write(self._extracted)
-        except OSError as e:
-            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
+        if not save_utils.write_bytes(self, self._extracted, path):
             return
         QMessageBox.information(self, "CTFusion", f"已保存 {len(self._extracted):,} 字节:\n{path}")
 
@@ -827,7 +795,7 @@ class ImagePanel(QWidget):
             return
         self.repair_hint.setText(
             f"IHDR:{info.width} x {info.height} | 位深 {info.bit_depth} | "
-            f"{info.color_name} | chunk {info.chunk_count} 个")
+            f"{info.color_name} | 数据块 {info.chunk_count} 个")
         self.spin_width.setValue(max(1, info.width))
         self.spin_height.setValue(max(1, info.height))
         rows = [(c.name, f"0x{self._prefix + c.offset:X}",
@@ -838,11 +806,11 @@ class ImagePanel(QWidget):
             for col, value in enumerate(values):
                 self.crc_table.setItem(row, col, QTableWidgetItem(value))
         if info.crc_errors:
-            self._log(f"⚠ 发现 {len(info.crc_errors)} 个 chunk CRC 错误")
+            self._log(f"⚠ 发现 {len(info.crc_errors)} 个数据块 CRC 错误")
         else:
-            self._log("✓ 所有 chunk 的 CRC 校验通过")
+            self._log("✓ 所有数据块的 CRC 校验通过")
         if info.truncated:
-            self._log("⚠ 文件存在截断的 chunk,部分修复可能失败")
+            self._log("⚠ 文件存在截断的数据块，部分修复可能失败")
         candidates = (
             fileparse.png_size_candidates(self._payload)
             if is_png and len(self._payload) <= self.PNG_DEEP_ANALYSIS_LIMIT
@@ -873,13 +841,8 @@ class ImagePanel(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "保存修复后的文件", default)
         if not path:
             return None
-        try:
-            with open(path, "wb") as f:
-                if self._prefix:
-                    f.write(self._data[:self._prefix])
-                f.write(data)
-        except OSError as e:
-            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
+        payload = (self._data[:self._prefix] if self._prefix else b"") + data
+        if not save_utils.write_bytes(self, payload, path):
             return None
         return path
 
@@ -888,7 +851,7 @@ class ImagePanel(QWidget):
         if info is None:
             return
         if not info.crc_errors:
-            QMessageBox.information(self, "CTFusion", "所有 chunk 的 CRC 均正确,无需修复")
+            QMessageBox.information(self, "CTFusion", "所有数据块的 CRC 均正确，无需修复")
             return
         fixed = fileparse.repair_png_crc(self._payload)
         path = self._save_bytes(fixed, "crcfix")
@@ -1026,6 +989,7 @@ class ImagePanel(QWidget):
         self._gif_frames = []
         self._image_buffer = None
         self.file_label.setText("拖入图片开始分析")
+        self.btn_qr.setEnabled(False)
         self.preview.setPixmap(QPixmap())
         self.preview.setText("图片预览")
         self.info_table.setRowCount(0)
@@ -1041,19 +1005,19 @@ class ImagePanel(QWidget):
         self.repair_log.clear()
         self.tool_log.clear()
         self.lsb_capacity.setText("单通道最低位容量:—")
-        self.chunk_hint.setText("仅 PNG 支持 Chunk 列表与文本块提取")
+        self.chunk_hint.setText("仅 PNG 支持数据块列表与文本块提取")
         self.repair_hint.setText("仅 PNG 支持 CRC 与宽高校验/修复")
         self.row_scan_status.setText(
             "遍历 R/G/B/A 通道顺序,提取 LSB 文本;flag 行会排在最前并高亮。")
         self.lsb_preview.setPixmap(QPixmap())
         self.lsb_preview.setText("位平面预览")
         self.tool_preview.setPixmap(QPixmap())
-        self.tool_preview.setText("通道 / XOR / 差分结果预览")
+        self.tool_preview.setText("通道 / 反色 / 直方图结果预览")
         self.frame_preview.setPixmap(QPixmap())
         self.frame_preview.setText("载入 GIF 后可逐帧查看")
         self.btn_bitplane.setEnabled(False)
         self.btn_extract.setEnabled(False)
-        self.stegsolve.set_image(None)
+        self.image_analysis.set_image(None)
 
     def _show_frame(self, index: int) -> None:
         if index < 0 or index >= len(self._gif_frames):
@@ -1076,7 +1040,7 @@ class ImagePanel(QWidget):
             return
         self._show_frame(index)
         self._set_pixels(self._gif_frames[index])
-        self.stegsolve.set_image(self._gif_frames[index])
+        self.image_analysis.set_image(self._gif_frames[index])
         self._sync_frame_combos(index, self.frame_combo)
 
     def _on_lsb_frame(self, index: int) -> None:
@@ -1084,5 +1048,5 @@ class ImagePanel(QWidget):
             return
         self._set_pixels(self._gif_frames[index])
         self._show_frame(index)
-        self.stegsolve.set_image(self._gif_frames[index])
+        self.image_analysis.set_image(self._gif_frames[index])
         self._sync_frame_combos(index, self.lsb_frame)

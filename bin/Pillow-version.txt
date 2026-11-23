@@ -1,0 +1,4 @@
+Pillow 12.1.0
+Source: https://python-pillow.org/
+License: HPND (see Pillow-license.txt)
+Purpose: image decode for QR / barcode scanning

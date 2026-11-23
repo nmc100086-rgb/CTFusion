@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 2, 0, 0),
-    prodvers=(2, 2, 0, 0),
+    filevers=(2, 3, 1, 0),
+    prodvers=(2, 3, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'CTFusion'),
             StringStruct('FileDescription', 'CTFusion CTF Multi Tool'),
-            StringStruct('FileVersion', '2.2.0.0'),
+            StringStruct('FileVersion', '2.3.1.0'),
             StringStruct('InternalName', 'CTFusion'),
-            StringStruct('LegalCopyright', 'bkcrack (c) kimci86, zlib license'),
-            StringStruct('OriginalFilename', 'CTFusion v2.2.exe'),
-            StringStruct('ProductName', 'CTFusion v2.2'),
-            StringStruct('ProductVersion', '2.2.0.0')
+            StringStruct('LegalCopyright', 'bkcrack (c) kimci86, zlib license; zxing-cpp Apache-2.0; Pillow HPND'),
+            StringStruct('OriginalFilename', 'CTFusion v2.3.exe'),
+            StringStruct('ProductName', 'CTFusion v2.3'),
+            StringStruct('ProductVersion', '2.3.1.0')
           ]
         )
       ]

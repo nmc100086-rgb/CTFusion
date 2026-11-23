@@ -1517,9 +1517,9 @@ class ImagePanelSmokeTests(unittest.TestCase):
                 with open(path, "wb") as f:
                     f.write(self._png_bytes())
                 panel.load_file(path)
-            panel.stegsolve._on_extract()
-            self.assertEqual(len(panel.stegsolve._extracted), 2)
-            self.assertTrue(panel.stegsolve.btn_save_extract.isEnabled())
+            panel.image_analysis._on_extract()
+            self.assertEqual(len(panel.image_analysis._extracted), 2)
+            self.assertTrue(panel.image_analysis.btn_save_extract.isEnabled())
         finally:
             window.close()
 

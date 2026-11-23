@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QGuiApplication, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -28,10 +28,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import filecarve, fileparse
+from core import filecarve, fileparse, fileprops
 from core.analysis import digests, entropy, entropy_blocks, strings
 from core.detect import detect_encodings
 from core.filetype import IdentifyResult, identify
+from ui import save_utils
 from ui.hex_viewer import HexViewer
 from ui.highlight import install_flag_highlighter, mark_item
 
@@ -190,6 +191,8 @@ class FilePanel(QWidget):
         self._result: IdentifyResult | None = None
         self._nodes: list[fileparse.Node] = []
         self._embedded: list[filecarve.EmbeddedFile] = []
+        self._digest_rows: dict[str, str] = {}
+        self._props_sections: list[fileprops.PropertySection] = []
         self._analysis_generation = 0
         self._analysis_tasks: set[AnalysisTask] = set()
         self._analysis_timer = QTimer(self)
@@ -223,6 +226,8 @@ class FilePanel(QWidget):
         self.tabs.addTab(self._build_structure(), "结构")
         self.tabs.addTab(self._build_embedded(), "嵌套")
         self.tabs.addTab(self._build_strings(), "字符串")
+        self.properties_page = self._build_properties()
+        self.tabs.addTab(self.properties_page, "文件属性")
         top.addWidget(self.tabs)
 
         right = QWidget()
@@ -285,7 +290,7 @@ class FilePanel(QWidget):
         self.btn_scan_embedded = QPushButton("扫描嵌套文件")
         self.btn_scan_embedded.clicked.connect(self._scan_embedded)
         bar.addWidget(self.btn_scan_embedded)
-        self.embedded_label = QLabel("binwalk 风格:扫描内嵌 PNG/JPEG/GIF/ZIP/PDF/ELF 等")
+        self.embedded_label = QLabel("扫描内嵌的 PNG/JPEG/GIF/ZIP/PDF/ELF 等文件")
         bar.addWidget(self.embedded_label, 1)
         self.btn_extract_embedded = QPushButton("提取选中…")
         self.btn_extract_embedded.clicked.connect(self._extract_embedded)
@@ -327,6 +332,32 @@ class FilePanel(QWidget):
         self.string_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.string_table.cellDoubleClicked.connect(self._on_string_click)
         layout.addWidget(self.string_table)
+        return page
+
+    def _build_properties(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        bar = QHBoxLayout()
+        self.props_hint = QLabel(
+            "路径、时间、Windows 属性、权限、文件类型和哈希；大文件哈希在后台分析完成后填入。")
+        self.props_hint.setWordWrap(True)
+        bar.addWidget(self.props_hint, 1)
+        self.btn_copy_props = QPushButton("复制全部属性")
+        self.btn_copy_props.clicked.connect(self._copy_properties)
+        bar.addWidget(self.btn_copy_props)
+        self.btn_refresh_props = QPushButton("刷新")
+        self.btn_refresh_props.clicked.connect(self._refresh_properties)
+        bar.addWidget(self.btn_refresh_props)
+        layout.addLayout(bar)
+
+        self.props_tree = QTreeWidget()
+        self.props_tree.setHeaderLabels(["属性", "值"])
+        self.props_tree.setColumnWidth(0, 160)
+        self.props_tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.props_tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.props_tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.props_tree.setAlternatingRowColors(True)
+        layout.addWidget(self.props_tree)
         return page
 
     # ---------------- 载入 ----------------
@@ -376,6 +407,7 @@ class FilePanel(QWidget):
         self._data = data
         self._read_only = not os.access(path, os.W_OK)
         self._result = identify(data, os.path.basename(path))
+        self._digest_rows = {}
         label = f"{self._path}  ({len(data):,} 字节)"
         if self._result.prefix:
             label += f"  [前置数据 {self._result.prefix} 字节]"
@@ -383,6 +415,7 @@ class FilePanel(QWidget):
             label += "  [只读]"
         self.file_label.setText(label)
         self._refresh_header()
+        self._refresh_properties()
         self.hex_viewer.set_data(data, read_only=self._read_only)
         self.hex_viewer.goto_offset(0)
         if len(data) <= self.SYNC_ANALYSIS_BYTES:
@@ -449,8 +482,10 @@ class FilePanel(QWidget):
         self._result = analysis.result
         self._nodes = list(analysis.nodes or [])
         self._embedded = analysis.embedded
+        self._digest_rows = dict(analysis.digest_rows)
         self._refresh_overview(analysis)
         self._refresh_header()
+        self._refresh_properties()
         self._populate_structure(analysis)
         self._populate_embedded(analysis.embedded, analysis.embedded_scanned)
         self._populate_strings(analysis.string_rows, analysis.string_error)
@@ -547,6 +582,57 @@ class FilePanel(QWidget):
             self.header_table.setItem(row, 0, QTableWidgetItem(key))
             self.header_table.setItem(row, 1, QTableWidgetItem(value))
 
+    def _refresh_properties(self) -> None:
+        if not hasattr(self, "props_tree"):
+            return
+        self.props_tree.clear()
+        self._props_sections = []
+        if not self._path:
+            self.props_hint.setText("载入文件后显示完整属性。")
+            return
+        try:
+            sections = fileprops.collect(
+                self._path,
+                data=self._data,
+                result=self._result,
+                digest_rows=self._digest_rows or None,
+                compute_hashes=False,
+            )
+        except OSError as exc:
+            self.props_hint.setText(str(exc))
+            return
+        self._props_sections = sections
+        self.props_hint.setText(
+            "路径、时间、Windows 属性、权限、文件类型和哈希；"
+            "大文件哈希在后台分析完成后填入。")
+        for section in sections:
+            top = QTreeWidgetItem([section.title, ""])
+            font = top.font(0)
+            font.setBold(True)
+            top.setFont(0, font)
+            self.props_tree.addTopLevelItem(top)
+            for key, value in section.rows:
+                child = QTreeWidgetItem([key, value])
+                child.setToolTip(1, value)
+                top.addChild(child)
+            top.setExpanded(True)
+
+    def _copy_properties(self) -> None:
+        if not self._props_sections:
+            QMessageBox.information(self, "CTFusion", "当前没有可复制的文件属性。")
+            return
+        QGuiApplication.clipboard().setText(
+            fileprops.sections_to_text(self._props_sections))
+        self.btn_copy_props.setText("已复制 ✓")
+        QTimer.singleShot(
+            1200, lambda: self.btn_copy_props.setText("复制全部属性"))
+
+    def show_properties(self) -> None:
+        self._refresh_properties()
+        index = self.tabs.indexOf(self.properties_page)
+        if index >= 0:
+            self.tabs.setCurrentIndex(index)
+
     def _populate_structure(self, analysis: FileAnalysis) -> None:
         self.structure.clear()
         if not analysis.parsed_supported or analysis.nodes is None:
@@ -614,7 +700,9 @@ class FilePanel(QWidget):
             return
         self._data = self.hex_viewer.data_bytes
         self._result = identify(self._data, os.path.basename(self._path))
+        self._digest_rows = {}
         self._refresh_header()
+        self._refresh_properties()
         self.file_label.setText(f"{self._path}  ({len(self._data):,} 字节)  [已修改]")
         if len(self._data) <= self.SYNC_ANALYSIS_BYTES:
             self._refresh_all()
@@ -643,6 +731,7 @@ class FilePanel(QWidget):
 
     def _save_as(self) -> None:
         if not self._data:
+            self.overview.setPlainText("当前没有已载入的文件，无法另存为。")
             return
         default = self._path or "output.bin"
         path, _ = QFileDialog.getSaveFileName(self, "另存为", default)
@@ -655,6 +744,7 @@ class FilePanel(QWidget):
         self._path = path
         self._read_only = not os.access(path, os.W_OK)
         self._result = identify(self._data, os.path.basename(path))
+        self._digest_rows = {}
         label = f"{path}  ({len(self._data):,} 字节)"
         if self._read_only:
             label += "  [只读]"
@@ -662,6 +752,7 @@ class FilePanel(QWidget):
         self.hex_viewer.set_data(
             self._data, read_only=self._read_only, preserve_search=True)
         self._refresh_header()
+        self._refresh_properties()
         if len(self._data) <= self.SYNC_ANALYSIS_BYTES:
             self._refresh_all()
         else:
@@ -686,7 +777,7 @@ class FilePanel(QWidget):
         self._embedded = []
         self.embedded_table.setRowCount(0)
         self.embedded_label.setText(
-            "binwalk 风格:扫描内嵌 PNG/JPEG/GIF/ZIP/PDF/ELF 等;点击扫描开始")
+            "扫描内嵌的 PNG/JPEG/GIF/ZIP/PDF/ELF 等文件；点击“扫描嵌套文件”开始")
         self.btn_extract_embedded.setEnabled(False)
         self.btn_extract_all_embedded.setEnabled(False)
 
@@ -742,11 +833,8 @@ class FilePanel(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "保存内嵌文件", default)
         if not path:
             return
-        try:
-            with open(path, "wb") as f:
-                f.write(filecarve.extract(self._data, item))
-        except OSError as e:
-            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
+        if not save_utils.write_bytes(
+                self, filecarve.extract(self._data, item), path):
             return
         QMessageBox.information(self, "CTFusion", f"已提取 {item.kind}:\n{path}")
 
@@ -756,16 +844,12 @@ class FilePanel(QWidget):
         target = QFileDialog.getExistingDirectory(self, "选择提取目录")
         if not target:
             return
-        count = 0
+        pending: list[tuple[str, bytes]] = []
         for row, item in enumerate(self._embedded):
             name = filecarve.safe_name(filecarve.suggested_name(item, row))
-            path = os.path.join(target, name)
-            try:
-                with open(path, "wb") as f:
-                    f.write(filecarve.extract(self._data, item))
-                count += 1
-            except OSError as e:
-                QMessageBox.warning(self, "CTFusion", f"写入 {name} 失败:{e}")
+            pending.append(
+                (os.path.join(target, name), filecarve.extract(self._data, item)))
+        count = save_utils.write_many(self, pending)
         QMessageBox.information(self, "CTFusion", f"已提取 {count} 个内嵌文件到:\n{target}")
 
     def shutdown(self, timeout_ms: int = 5_000) -> bool:
@@ -787,14 +871,19 @@ class FilePanel(QWidget):
         self._result = None
         self._nodes = []
         self._embedded = []
+        self._digest_rows = {}
+        self._props_sections = []
         self.file_label.setText("拖入任意文件开始分析")
         self.overview.clear()
         self.header_table.setRowCount(0)
         self.structure.clear()
         self.string_table.setRowCount(0)
         self.embedded_table.setRowCount(0)
+        if hasattr(self, "props_tree"):
+            self.props_tree.clear()
+            self.props_hint.setText("载入文件后显示完整属性。")
         self.embedded_label.setText(
-            "binwalk 风格:扫描内嵌 PNG/JPEG/GIF/ZIP/PDF/ELF 等")
+            "扫描内嵌的 PNG/JPEG/GIF/ZIP/PDF/ELF 等文件")
         self.entropy_plot.set_blocks([])
         self.hex_viewer.clear()
         self.btn_extract_embedded.setEnabled(False)

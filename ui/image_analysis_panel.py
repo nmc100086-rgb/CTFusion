@@ -1,10 +1,10 @@
-"""StegSolve 风格工具:Data Extract / Image Combiner / Stereogram / Random Color Map."""
+"""图像分析工具：数据提取、图像合成、立体图和随机颜色映射。"""
 
 from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QBuffer, QIODevice, Qt
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import imagetools, lsb, stegsolve
+from ui import save_utils
 from ui.highlight import install_flag_highlighter
 
 
@@ -34,8 +35,8 @@ def _scaled(image: QImage, label: QLabel) -> QPixmap:
     return pixmap
 
 
-class StegSolvePanel(QWidget):
-    """集中放置 StegSolve 中适合纯 Python 实现的功能。"""
+class ImageAnalysisPanel(QWidget):
+    """集中放置适合本地实现的图像分析功能。"""
 
     CHANNEL_NAMES = ("R", "G", "B", "A")
 
@@ -53,17 +54,17 @@ class StegSolvePanel(QWidget):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_extract(), "Data Extract")
-        self.tabs.addTab(self._build_combiner(), "Image Combiner")
-        self.tabs.addTab(self._build_stereogram(), "Stereogram")
-        self.tabs.addTab(self._build_color_map(), "Random Color Map")
+        self.tabs.addTab(self._build_extract(), "数据提取")
+        self.tabs.addTab(self._build_combiner(), "图像合成")
+        self.tabs.addTab(self._build_stereogram(), "立体图")
+        self.tabs.addTab(self._build_color_map(), "颜色映射")
         layout.addWidget(self.tabs)
 
-    # ---------------- Data Extract ----------------
+    # ---------------- 数据提取 ----------------
     def _build_extract(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("勾选每个通道要提取的 bit 平面:"))
+        layout.addWidget(QLabel("勾选每个通道要提取的位平面："))
 
         grid = QGridLayout()
         grid.addWidget(QLabel("通道"), 0, 0)
@@ -92,10 +93,10 @@ class StegSolvePanel(QWidget):
         opts.addWidget(self.channel_order)
         opts.addWidget(QLabel("位序:"))
         self.bit_order = QComboBox()
-        self.bit_order.addItem("MSB first", "msb")
-        self.bit_order.addItem("LSB first", "lsb")
+        self.bit_order.addItem("高位优先 (MSB)", "msb")
+        self.bit_order.addItem("低位优先 (LSB)", "lsb")
         opts.addWidget(self.bit_order)
-        opts.addWidget(QLabel("bit 平面顺序:"))
+        opts.addWidget(QLabel("位平面顺序："))
         self.plane_order = QComboBox()
         self.plane_order.addItem("低位→高位", "low")
         self.plane_order.addItem("高位→低位", "high")
@@ -115,7 +116,7 @@ class StegSolvePanel(QWidget):
         opts.addStretch()
         layout.addLayout(opts)
 
-        self.extract_preview = QLabel("选择 bit 平面后点击提取")
+        self.extract_preview = QLabel("选择位平面后点击“提取”")
         self.extract_preview.setAlignment(Qt.AlignCenter)
         self.extract_preview.setMinimumHeight(100)
         self.extract_preview.setStyleSheet("background:#1b1b1b;color:#888;")
@@ -136,10 +137,11 @@ class StegSolvePanel(QWidget):
 
     def _on_extract(self) -> None:
         if not self._pixels:
+            self.extract_preview.setText("请先载入图片，再提取位平面数据。")
             return
         selected = self._selected_bits()
         if not selected:
-            QMessageBox.information(self, "CTFusion", "请至少勾选一个 bit 平面")
+            QMessageBox.information(self, "CTFusion", "请至少勾选一个位平面")
             return
         order = self.channel_order.currentData() or (0, 1, 2)
         self._extracted = stegsolve.extract_selected(
@@ -161,18 +163,14 @@ class StegSolvePanel(QWidget):
         if not self._extracted:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存 Data Extract 结果", "stegsolve_extract.bin")
+            self, "保存数据提取结果", "image_extract.bin")
         if not path:
             return
-        try:
-            with open(path, "wb") as f:
-                f.write(self._extracted)
-        except OSError as e:
-            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
+        if not save_utils.write_bytes(self, self._extracted, path):
             return
         QMessageBox.information(self, "CTFusion", f"已保存 {len(self._extracted):,} 字节")
 
-    # ---------------- Image Combiner ----------------
+    # ---------------- 图像合成 ----------------
     def _build_combiner(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -180,9 +178,9 @@ class StegSolvePanel(QWidget):
         bar.addWidget(QLabel("运算:"))
         self.combine_op = QComboBox()
         for label, value in (
-            ("XOR", "xor"), ("ADD", "add"), ("SUB", "sub"),
-            ("AND", "and"), ("OR", "or"), ("MIN", "min"),
-            ("MAX", "max"), ("DIFF", "diff"),
+            ("异或 (XOR)", "xor"), ("相加", "add"), ("相减", "sub"),
+            ("按位与", "and"), ("按位或", "or"), ("取小", "min"),
+            ("取大", "max"), ("差分", "diff"),
         ):
             self.combine_op.addItem(label, value)
         bar.addWidget(self.combine_op)
@@ -195,7 +193,7 @@ class StegSolvePanel(QWidget):
         bar.addWidget(self.btn_save_combine)
         bar.addStretch()
         layout.addLayout(bar)
-        self.combine_preview = QLabel("XOR / ADD / SUB / AND / OR / MIN / MAX / DIFF")
+        self.combine_preview = QLabel("异或 / 相加 / 相减 / 按位与 / 按位或 / 取小 / 取大 / 差分")
         self.combine_preview.setAlignment(Qt.AlignCenter)
         self.combine_preview.setStyleSheet("background:#1b1b1b;color:#888;")
         layout.addWidget(self.combine_preview, 1)
@@ -226,7 +224,7 @@ class StegSolvePanel(QWidget):
             return
         self._set_result(result, self.combine_preview, self.btn_save_combine)
 
-    # ---------------- Stereogram ----------------
+    # ---------------- 立体图 ----------------
     def _build_stereogram(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -241,7 +239,7 @@ class StegSolvePanel(QWidget):
         self.max_offset.setRange(2, 500)
         self.max_offset.setValue(60)
         bar.addWidget(self.max_offset)
-        self.btn_stereo = QPushButton("解 Stereogram")
+        self.btn_stereo = QPushButton("解析立体图")
         self.btn_stereo.clicked.connect(self._on_stereogram)
         bar.addWidget(self.btn_stereo)
         self.btn_save_stereo = QPushButton("保存结果…")
@@ -266,7 +264,7 @@ class StegSolvePanel(QWidget):
             return
         self._set_result(result, self.stereo_preview, self.btn_save_stereo)
 
-    # ---------------- Random Color Map ----------------
+    # ---------------- 随机颜色映射 ----------------
     def _build_color_map(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -308,11 +306,15 @@ class StegSolvePanel(QWidget):
         if self._result_image is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存 StegSolve 结果", "stegsolve_result.png", "PNG (*.png)")
+            self, "保存图像分析结果", "image_analysis.png", "PNG (*.png)")
         if not path:
             return
-        if not self._result_image.save(path, "PNG"):
+        buffer = QBuffer()
+        buffer.open(QIODevice.WriteOnly)
+        if not self._result_image.save(buffer, "PNG"):
             QMessageBox.warning(self, "CTFusion", "保存失败")
+            return
+        if not save_utils.write_bytes(self, bytes(buffer.data()), path, "image"):
             return
         QMessageBox.information(self, "CTFusion", f"已保存:\n{path}")
 
@@ -333,9 +335,9 @@ class StegSolvePanel(QWidget):
         self._pixels, self._width, self._height = imagetools.rgba_data(image)
         self.extract_output.clear()
         self.extract_preview.setPixmap(QPixmap())
-        self.extract_preview.setText("选择 bit 平面后点击提取")
+        self.extract_preview.setText("选择位平面后点击“提取”")
         self.combine_preview.setPixmap(QPixmap())
-        self.combine_preview.setText("XOR / ADD / SUB / AND / OR / MIN / MAX / DIFF")
+        self.combine_preview.setText("异或 / 相加 / 相减 / 按位与 / 按位或 / 取小 / 取大 / 差分")
         self.stereo_preview.setPixmap(QPixmap())
         self.stereo_preview.setText("自动立体图深度图")
         self.map_preview.setPixmap(QPixmap())

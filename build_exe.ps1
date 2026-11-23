@@ -1,5 +1,6 @@
 param(
-    [switch]$NoClean
+    [switch]$NoClean,
+    [string]$OutputRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,8 +20,12 @@ if ($actualHash -ne $expectedHash) {
     Write-Warning "bin\bkcrack.exe SHA-256 differs from the tested 1.8.1 build; packaging will continue."
 }
 
-$name = "CTFusion v2.2"
-$distRoot = Join-Path $PSScriptRoot "dist"
+$name = "CTFusion v2.3"
+$distRoot = if ($OutputRoot) {
+    Join-Path $PSScriptRoot $OutputRoot
+} else {
+    Join-Path $PSScriptRoot "dist"
+}
 $argsList = @(
     "-m", "PyInstaller",
     "--noconfirm",
@@ -33,6 +38,15 @@ $argsList = @(
     "--add-data", "bin\bkcrack-license.txt;bin",
     "--add-data", "bin\bkcrack-readme.md;bin",
     "--add-data", "bin\bkcrack-version.txt;bin",
+    "--add-data", "bin\zxingcpp-license.txt;bin",
+    "--add-data", "bin\zxingcpp-version.txt;bin",
+    "--add-data", "bin\Pillow-license.txt;bin",
+    "--add-data", "bin\Pillow-version.txt;bin",
+    "--hidden-import", "zxingcpp",
+    "--hidden-import", "PIL.Image",
+    "--hidden-import", "PIL.PngImagePlugin",
+    "--hidden-import", "PIL.JpegImagePlugin",
+    "--hidden-import", "PIL.GifImagePlugin",
     "--version-file", "packaging\version_info.txt",
     "--distpath", $distRoot,
     "--workpath", (Join-Path $PSScriptRoot "build"),
@@ -66,10 +80,40 @@ if ($test.ExitCode -ne 0) {
     throw "Packaged self-test failed with exit code $($test.ExitCode)"
 }
 
+# First-run helper: clear the Mark-of-the-Web, then start the program, so
+# SmartScreen only appears the first time. The Chinese file name is decoded
+# from UTF-8 bytes to keep this script ASCII-only (Windows PowerShell 5.1
+# reads BOM-less scripts with the ANSI code page).
+$launcherName = [Text.Encoding]::UTF8.GetString(
+    [Convert]::FromBase64String(
+        '6aaW5qyh6L+Q6KGMLeino+mZpFdpbmRvd3Pmi6bmiKouY21k'))
+$launcher = Join-Path (Split-Path -Path $exe -Parent) $launcherName
+$launcherBody = @"
+@echo off
+rem Unblock downloaded files (Mark-of-the-Web) and start CTFusion.
+set "APPDIR=%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -LiteralPath '%APPDIR%' -Recurse -File -Force -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue"
+start "" "%APPDIR%$name.exe"
+"@
+Set-Content -LiteralPath $launcher -Value $launcherBody -Encoding ASCII -NoNewline
+
+# Administrator launcher: full write access (UAC prompt on each start).
+$adminName = [Text.Encoding]::UTF8.GetString(
+    [Convert]::FromBase64String(
+        '5Lul566h55CG5ZGY6Lqr5Lu96L+Q6KGMLmNtZA=='))
+$adminLauncher = Join-Path (Split-Path -Path $exe -Parent) $adminName
+$adminBody = @"
+@echo off
+rem Start CTFusion with administrator rights (UAC prompt).
+set "APPDIR=%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%APPDIR%$name.exe' -Verb RunAs"
+"@
+Set-Content -LiteralPath $adminLauncher -Value $adminBody -Encoding ASCII -NoNewline
+
 Remove-Item -LiteralPath (Join-Path $PSScriptRoot "build") -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $PSScriptRoot "CTFusion.spec") -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $PSScriptRoot "$name.spec") -Force -ErrorAction SilentlyContinue
-Get-ChildItem -LiteralPath $PSScriptRoot -Recurse -Directory -Filter "__pycache__" |
+Get-ChildItem -LiteralPath $PSScriptRoot -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""

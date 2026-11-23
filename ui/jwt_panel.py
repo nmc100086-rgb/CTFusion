@@ -41,8 +41,8 @@ class JwtPanel(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("JWT Token:"))
-        self.token_edit = _text_edit("粘贴 header.payload.signature")
+        layout.addWidget(QLabel("JWT 令牌："))
+        self.token_edit = _text_edit("粘贴 JWT 令牌（头部.载荷.签名）")
         self.token_edit.setMaximumHeight(90)
         layout.addWidget(self.token_edit)
 
@@ -55,7 +55,7 @@ class JwtPanel(QWidget):
             "使用右侧“密钥/私钥”输入框中的 HMAC 密钥或 RSA 公钥/私钥验证签名")
         self.btn_verify.clicked.connect(self._on_verify)
         bar.addWidget(self.btn_verify)
-        self.btn_copy = QPushButton("复制 Token")
+        self.btn_copy = QPushButton("复制令牌")
         self.btn_copy.clicked.connect(self._on_copy_token)
         bar.addWidget(self.btn_copy)
         self.btn_clear = QPushButton("清空")
@@ -70,12 +70,12 @@ class JwtPanel(QWidget):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         self.decoded_tabs = QTabWidget()
-        self.header_view = _text_edit("Header", True)
-        self.payload_view = _text_edit("Payload", True)
-        self.signature_view = _text_edit("Signature", True)
-        self.decoded_tabs.addTab(self.header_view, "Header")
-        self.decoded_tabs.addTab(self.payload_view, "Payload")
-        self.decoded_tabs.addTab(self.signature_view, "Signature")
+        self.header_view = _text_edit("JWT 头部", True)
+        self.payload_view = _text_edit("JWT 载荷", True)
+        self.signature_view = _text_edit("JWT 签名", True)
+        self.decoded_tabs.addTab(self.header_view, "头部")
+        self.decoded_tabs.addTab(self.payload_view, "载荷")
+        self.decoded_tabs.addTab(self.signature_view, "签名")
         left_layout.addWidget(self.decoded_tabs)
         splitter.addWidget(left)
 
@@ -88,22 +88,22 @@ class JwtPanel(QWidget):
             self.alg_combo.addItem(alg, alg)
         alg_row.addWidget(self.alg_combo)
         alg_row.addWidget(QLabel("密钥/私钥:"))
-        self.secret_edit = _text_edit("HMAC secret，或 RS256 PEM 私钥")
+        self.secret_edit = _text_edit("HMAC 密钥，或 RS256 PEM 私钥")
         self.secret_edit.setMaximumHeight(70)
         right_layout.addLayout(alg_row)
         right_layout.addWidget(self.secret_edit)
 
-        right_layout.addWidget(QLabel("Header JSON:"))
+        right_layout.addWidget(QLabel("JWT 头部 JSON："))
         self.header_edit = _text_edit('{"typ":"JWT","alg":"HS256"}')
         self.header_edit.setMaximumHeight(100)
         right_layout.addWidget(self.header_edit)
-        right_layout.addWidget(QLabel("Payload JSON:"))
+        right_layout.addWidget(QLabel("JWT 载荷 JSON："))
         self.payload_edit = _text_edit('{"sub":"admin","role":"admin"}')
         self.payload_edit.setMinimumHeight(120)
         right_layout.addWidget(self.payload_edit)
 
         gen_bar = QHBoxLayout()
-        self.btn_generate = QPushButton("生成 Token")
+        self.btn_generate = QPushButton("生成令牌")
         self.btn_generate.clicked.connect(self._on_generate)
         gen_bar.addWidget(self.btn_generate)
         self.btn_copy_generated = QPushButton("复制生成结果")
@@ -155,17 +155,17 @@ class JwtPanel(QWidget):
         index = self.alg_combo.findData(alg)
         if index >= 0:
             self.alg_combo.setCurrentIndex(index)
-        self._set_status("解析成功，可修改 Payload 后重新生成/伪造")
+        self._set_status("解析成功，可修改载荷后重新生成/伪造")
 
     def _on_verify(self) -> None:
         token = self.token_edit.toPlainText().strip()
         if not token:
-            self._set_status("请先粘贴 JWT Token", False)
+            self._set_status("请先粘贴 JWT 令牌", False)
             return
         try:
             decoded = jwt_tool.decode(token)
         except jwt_tool.JwtError as e:
-            self._set_status("验证失败:Token 无法解析", False)
+            self._set_status("验证失败：令牌无法解析", False)
             QMessageBox.warning(self, "CTFusion", str(e))
             return
         ok = jwt_tool.verify(token, self.secret_edit.toPlainText())
@@ -176,7 +176,7 @@ class JwtPanel(QWidget):
                 f"✓ 签名验证通过({decoded.header.get('alg', '?')})", True)
         else:
             self._set_status(
-                "✗ 签名验证失败，请检查密钥/公钥、算法或 Token 是否被篡改", False)
+                "✗ 签名验证失败，请检查密钥/公钥、算法或令牌是否被篡改", False)
 
     def _on_generate(self) -> None:
         try:
@@ -195,12 +195,20 @@ class JwtPanel(QWidget):
         self.generated_edit.setPlainText(token)
         self.token_edit.setPlainText(token)
         self._set_status(
-            f"已生成 {alg} Token，签名长度 {len(token.split('.')[-1])}")
+            f"已生成 {alg} 令牌，签名长度 {len(token.split('.')[-1])}")
 
     def _on_copy_token(self) -> None:
-        QGuiApplication.clipboard().setText(self.token_edit.toPlainText())
-        self._set_status("Token 已复制")
+        text = self.token_edit.toPlainText().strip()
+        if not text:
+            self._set_status("当前没有 JWT 令牌可复制，请先解析或生成令牌。", False)
+            return
+        QGuiApplication.clipboard().setText(text)
+        self._set_status("令牌已复制")
 
     def _on_copy_generated(self) -> None:
-        QGuiApplication.clipboard().setText(self.generated_edit.toPlainText())
+        text = self.generated_edit.toPlainText().strip()
+        if not text:
+            self._set_status("当前没有生成结果可复制，请先生成令牌。", False)
+            return
+        QGuiApplication.clipboard().setText(text)
         self._set_status("生成结果已复制")

@@ -17,3 +17,4 @@ dist/
 .tmp/
 bin/bkcrack-release/
 bin/bkcrack-*.zip
+debug.log

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import fileparse, zipcrack
+from ui import save_utils
 from ui.highlight import install_flag_highlighter, mark_item
 from ui.zip_attack_panels import CrcAttackPanel, KpaAttackPanel
 
@@ -256,12 +257,12 @@ class ZipPanel(QWidget):
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
         layout.addWidget(self.progress)
-        self.status = QLabel("载入 ZIP 后选择模式开始恢复;仅支持 ZipCrypto,不支持 AES。")
+        self.status = QLabel("载入 ZIP 后选择模式开始恢复；仅支持 ZipCrypto，不支持 AES。")
         layout.addWidget(self.status)
         self.recovery_hint = QLabel(
-            "恢复不出来时依次检查:①「结构」页看是否 AES/WinZip(本工具不支持);"
-            "②密码是否确实在字典/掩码范围内;③中文密码把编码改为 GBK 或自动;"
-            "④掩码写 ???? 并在下拉菜单勾选字符集,?d/?l 固定写法已移除;"
+            "恢复不出来时依次检查：①「结构」页看是否 AES 加密（本工具不支持）；"
+            "②密码是否确实在字典/掩码范围内；③中文密码把编码改为 GBK 或自动；"
+            "④掩码写 ???? 并在下拉菜单勾选字符集，?d/?l 固定写法已移除；"
             "⑤0 字节加密条目无法可靠校验密码。")
         self.recovery_hint.setWordWrap(True)
         self.recovery_hint.setStyleSheet("color:#888; font-size:12px;")
@@ -509,7 +510,7 @@ class ZipPanel(QWidget):
             self.progress.setRange(0, 0)
             eta = "--"
         self.status.setText(
-            f"已尝试 {tried:,} / {total:,}  |  {speed:,.0f} pwd/s  |  剩余 {eta}  |  当前: {current[:40]}")
+            f"已尝试 {tried:,} / {total:,}  |  {speed:,.0f} 个/秒  |  剩余 {eta}  |  当前：{current[:40]}")
 
     def _on_result(self, result: zipcrack.CrackResult) -> None:
         self._result_received = True
@@ -524,12 +525,12 @@ class ZipPanel(QWidget):
             self.btn_copy_pwd.setEnabled(True)
             self.status.setText(
                 f"✓ 已找到密码,尝试 {result.tried:,} 次,耗时 {result.elapsed:.2f}s"
-                f",{result.speed:,.0f} pwd/s")
+                f"，{result.speed:,.0f} 个/秒")
             self.recovery_log.appendPlainText(
                 f"✓ 密码 = {result.password}\n"
                 f"  条目 = {result.entry_name}\n"
                 f"  尝试 = {result.tried:,}  耗时 = {result.elapsed:.2f}s  "
-                f"速度 = {result.speed:,.0f} pwd/s")
+                f"速度 = {result.speed:,.0f} 个/秒")
             QApplication.beep()
         elif result.cancelled:
             self.progress.setValue(0)
@@ -661,14 +662,13 @@ class ZipPanel(QWidget):
                 f"检测到 {len(crackable)} 个可校验的 ZipCrypto 条目,"
                 "可在「密码恢复」页签尝试字典/暴力/掩码恢复。")
             self.status.setText(
-                "可尝试 ZipCrypto 密码恢复;只支持 ZipCrypto,不支持 AES。")
+                "可尝试 ZipCrypto 密码恢复；只支持 ZipCrypto，不支持 AES。")
         elif aes_entries:
             self.log.appendPlainText(
-                f"⚠ 检测到 {len(aes_entries)} 个 AES/WinZip 加密条目。"
-                "本工具只支持 ZipCrypto;请用 7-Zip / WinRAR 输入密码解压,"
-                "或改用支持 AES 的工具(如 bkcrack 不支持 AES)。")
+                f"⚠ 检测到 {len(aes_entries)} 个 AES 加密条目。"
+                "本工具只支持 ZipCrypto；请用支持 AES 的解压工具输入密码解压。")
             self.status.setText(
-                "检测到 AES/WinZip 加密,本工具只支持 ZipCrypto,无法恢复。")
+                "检测到 AES 加密，本工具只支持 ZipCrypto，无法恢复。")
         elif zipcrypto_entries:
             self.log.appendPlainText(
                 "⚠ 加密条目为空(0 字节)或压缩数据不足,"
@@ -693,11 +693,7 @@ class ZipPanel(QWidget):
             self, "保存修复后的 ZIP", base + "_fixed.zip", "ZIP (*.zip)")
         if not path:
             return
-        try:
-            with open(path, "wb") as f:
-                f.write(fixed)
-        except OSError as e:
-            QMessageBox.warning(self, "CTFusion", f"保存失败:{e}")
+        if not save_utils.write_bytes(self, fixed, path, "archive"):
             return
         old_path = self._path
         self.log.appendPlainText(f"✓ 已清除 {count} 个条目的伪加密标志:{path}")
@@ -814,5 +810,5 @@ class ZipPanel(QWidget):
         self.progress.setValue(0)
         self.crc_panel.clear()
         self.kpa_panel.clear()
-        self.status.setText("载入 ZIP 后选择模式开始恢复;仅支持 ZipCrypto,不支持 AES。")
+        self.status.setText("载入 ZIP 后选择模式开始恢复；仅支持 ZipCrypto，不支持 AES。")
         return True

@@ -7,6 +7,7 @@ core.bkcrack 以固定参数调用,不在 Python 中实现攻击算法。
 from __future__ import annotations
 
 import os
+import tempfile
 import threading
 import zlib
 
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import bkcrack, zipcrack
+from ui import save_utils
 from ui.highlight import install_flag_highlighter
 
 
@@ -828,9 +830,17 @@ class KpaAttackPanel(QWidget):
             return
 
         def action() -> None:
-            bkcrack.decrypt_entry(
-                self._path, self._data, index, self._keys, path,
-                on_output=self._on_output)
+            # bkcrack 只写私有临时目录，最终位置交给保存策略处理，
+            # 这样目标目录需要管理员权限时也能按统一流程提权写入。
+            with tempfile.TemporaryDirectory(prefix="ctfusion-dec-") as temp_dir:
+                plain_path = os.path.join(temp_dir, "plain.bin")
+                plain = bkcrack.decrypt_entry(
+                    self._path, self._data, index, self._keys, plain_path,
+                    on_output=self._on_output)
+                if not os.path.isfile(plain_path):
+                    raise RuntimeError("bkcrack 未生成解密文件")
+            if not save_utils.write_bytes(self, plain, path):
+                return
             self.log.appendPlainText(f"✓ 已解密条目到:{path}")
             QMessageBox.information(self, "CTFusion", f"已解密:\n{path}")
 
@@ -846,11 +856,17 @@ class KpaAttackPanel(QWidget):
             return
 
         def action() -> None:
-            run = bkcrack.remove_password(
-                self._path, self._keys, path, on_output=self._on_output)
-            if not os.path.isfile(path):
-                raise RuntimeError(
-                    run.output.splitlines()[-1] if run.output else "未生成输出文件")
+            with tempfile.TemporaryDirectory(prefix="ctfusion-unlock-") as temp_dir:
+                temp_out = os.path.join(temp_dir, "unlocked.zip")
+                run = bkcrack.remove_password(
+                    self._path, self._keys, temp_out, on_output=self._on_output)
+                if not os.path.isfile(temp_out):
+                    raise RuntimeError(
+                        run.output.splitlines()[-1] if run.output else "未生成输出文件")
+                with open(temp_out, "rb") as handle:
+                    data = handle.read()
+            if not save_utils.write_bytes(self, data, path, "archive"):
+                return
             self.log.appendPlainText(f"✓ 已生成无密码 ZIP:{path}")
             QMessageBox.information(
                 self, "CTFusion",
@@ -874,12 +890,18 @@ class KpaAttackPanel(QWidget):
             return
 
         def action() -> None:
-            run = bkcrack.change_password(
-                self._path, self._keys, path, password,
-                on_output=self._on_output)
-            if not os.path.isfile(path):
-                raise RuntimeError(
-                    run.output.splitlines()[-1] if run.output else "未生成输出文件")
+            with tempfile.TemporaryDirectory(prefix="ctfusion-newpass-") as temp_dir:
+                temp_out = os.path.join(temp_dir, "newpass.zip")
+                run = bkcrack.change_password(
+                    self._path, self._keys, temp_out, password,
+                    on_output=self._on_output)
+                if not os.path.isfile(temp_out):
+                    raise RuntimeError(
+                        run.output.splitlines()[-1] if run.output else "未生成输出文件")
+                with open(temp_out, "rb") as handle:
+                    data = handle.read()
+            if not save_utils.write_bytes(self, data, path, "archive"):
+                return
             self.log.appendPlainText(f"✓ 已生成新密码 ZIP:{path}")
             QMessageBox.information(self, "CTFusion", f"已生成新密码副本:\n{path}")
 
