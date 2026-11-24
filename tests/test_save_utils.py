@@ -68,16 +68,15 @@ class SavePermissionTests(unittest.TestCase):
 
     def test_writes_to_any_folder_without_prompt(self):
         target = Path(self._dir.name) / "其他盘" / "题目" / "flag.png"
-        with patch.object(
-                save_utils, "_denied_dialog",
-                side_effect=AssertionError("不应弹出权限对话框")):
-            self.assertTrue(save_utils.write_bytes(self, b"png", target))
+        self.assertTrue(save_utils.write_bytes(self, b"png", target))
         self.assertEqual(target.read_bytes(), b"png")
 
-    def test_permission_denied_elevates_and_remembers(self):
+    def test_permission_denied_elevates_automatically(self):
+        save_utils.set_allow_elevation(True)
+        self.addCleanup(save_utils.set_allow_elevation, False)
         target = Path(self._dir.name) / "protected.bin"
         real_write = save_utils._write_bytes
-        calls = {"denied": 0, "elevated": 0}
+        calls = {"elevated": 0}
 
         def fake_write(path, data):
             if Path(path) == target:
@@ -89,52 +88,14 @@ class SavePermissionTests(unittest.TestCase):
             real_write(path, data)
             return True, ""
 
-        def fake_dialog(*args, **kwargs):
-            calls["denied"] += 1
-            return save_utils.POLICY_ELEVATE, True
-
         with patch.object(save_utils, "_write_bytes", side_effect=fake_write), \
                 patch.object(save_utils, "_elevated_write",
-                             side_effect=fake_elevated), \
-                patch.object(save_utils, "_denied_dialog",
-                             side_effect=fake_dialog):
+                             side_effect=fake_elevated):
             self.assertTrue(save_utils.write_bytes(self, b"data", target))
-            self.assertEqual(calls, {"denied": 1, "elevated": 1})
-            self.assertEqual(save_utils.permission_policy(),
-                             save_utils.POLICY_ELEVATE)
-            # 第二次被拒绝时直接按记住的策略提权，不再弹选择框。
+            # 第二次仍然自动提权，不需要再确认。
             self.assertTrue(save_utils.write_bytes(self, b"data2", target))
-        self.assertEqual(calls["denied"], 1)
+        self.assertEqual(calls["elevated"], 2)
         self.assertEqual(target.read_bytes(), b"data2")
-
-    def test_remembered_choice_can_redirect_to_user_folder(self):
-        target = Path(self._dir.name) / "protected.bin"
-        user_dir = Path(self._dir.name) / "用户目录"
-        user_dir.mkdir()
-        real_write = save_utils._write_bytes
-
-        def fake_write(path, data):
-            if Path(path) == target:
-                raise PermissionError("denied")
-            return real_write(path, data)
-
-        with patch.object(save_utils, "_write_bytes", side_effect=fake_write), \
-                patch.object(save_utils, "user_directory",
-                             return_value=str(user_dir)), \
-                patch.object(save_utils.QFileDialog, "getSaveFileName",
-                             return_value=(str(target), "")), \
-                patch.object(save_utils, "_denied_dialog",
-                             return_value=(save_utils.POLICY_USER, True)):
-            saved = save_utils.save_file_bytes(
-                self, b"payload", str(target), title="保存文件")
-            self.assertEqual(saved, str(user_dir / "protected.bin"))
-            self.assertEqual(Path(saved).read_bytes(), b"payload")
-            self.assertEqual(save_utils.permission_policy(),
-                             save_utils.POLICY_USER)
-            # 记住选择后再次遇到无权限会直接改存用户目录。
-            second = save_utils.save_file_bytes(
-                self, b"payload2", str(target), title="保存文件")
-            self.assertEqual(Path(second).read_bytes(), b"payload2")
 
     def test_choose_another_location_retries_dialog(self):
         first = Path(self._dir.name) / "denied.bin"
@@ -156,6 +117,55 @@ class SavePermissionTests(unittest.TestCase):
                 self, b"abc", str(first), title="保存文件")
         self.assertEqual(saved, str(second))
         self.assertEqual(second.read_bytes(), b"abc")
+
+    def test_denied_falls_back_without_elevation_by_default(self):
+        save_utils.set_allow_elevation(False)
+        self.addCleanup(save_utils.set_allow_elevation, True)
+        target = Path(self._dir.name) / "blocked.bin"
+        user_dir = Path(self._dir.name) / "用户目录"
+        user_dir.mkdir()
+        real_write = save_utils._write_bytes
+
+        def fake_write(path, data):
+            if Path(path) == target:
+                raise PermissionError("denied")
+            return real_write(path, data)
+
+        with patch.object(save_utils, "_write_bytes", side_effect=fake_write), \
+                patch.object(save_utils, "user_directory",
+                             return_value=str(user_dir)), \
+                patch.object(save_utils, "_elevated_write",
+                             side_effect=AssertionError("不应请求管理员权限")), \
+                patch.object(save_utils.QFileDialog, "getSaveFileName",
+                             return_value=(str(target), "")):
+            self.assertFalse(save_utils.allow_elevation())
+            saved = save_utils.save_file_bytes(
+                self, b"payload", str(target), title="保存文件")
+        self.assertEqual(saved, str(user_dir / "blocked.bin"))
+        self.assertEqual(Path(saved).read_bytes(), b"payload")
+
+    def test_remembered_drive_root_is_ignored_and_cleared(self):
+        save_utils._settings().setValue(save_utils._LAST_DIR_KEY, "D:\\")
+        with patch.object(save_utils, "user_directory",
+                          return_value=str(self._dir.name)):
+            self.assertEqual(
+                save_utils.last_directory("image"), str(self._dir.name))
+        self.assertNotIn(save_utils._LAST_DIR_KEY, _FakeSettings.store)
+
+    def test_remember_directory_skips_drive_root(self):
+        save_utils._remember_directory(Path("D:/flag.png"))
+        self.assertNotIn(save_utils._LAST_DIR_KEY, _FakeSettings.store)
+
+    def test_sanitize_default_moves_drive_root_to_user_folder(self):
+        with patch.object(save_utils, "user_directory",
+                          return_value=str(self._dir.name)):
+            default = save_utils._sanitize_default("D:\\flag.png", "image")
+        self.assertEqual(default, str(Path(self._dir.name) / "flag.png"))
+
+    def test_startup_repair_clears_drive_root(self):
+        save_utils._settings().setValue(save_utils._LAST_DIR_KEY, "D:\\")
+        save_utils.ensure_sane_save_directory()
+        self.assertNotIn(save_utils._LAST_DIR_KEY, _FakeSettings.store)
 
     def test_save_bytes_dialog_keeps_old_signature(self):
         target = Path(self._dir.name) / "base64.png"
@@ -209,6 +219,39 @@ class ElevatedTaskTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual((self.workdir / "out-a.bin").read_bytes(), b"a")
         self.assertEqual((self.workdir / "out-b.bin").read_bytes(), b"b")
+
+    def test_run_task_works_when_temp_dir_is_blocked(self):
+        target = self.workdir / "fallback_out.bin"
+        seen = {}
+
+        def fake_runas(launcher, params, cwd):
+            task = params.split('"')[-2]
+            seen["task"] = task
+            elevate.run_elevated_task(
+                ["CTFusion", elevate.ELEVATED_FLAG, task])
+            return 33, 0
+
+        with patch("core.elevate.tempfile.mkdtemp",
+                   side_effect=PermissionError("denied")), \
+                patch("core.elevate._shell_execute_runas",
+                      side_effect=fake_runas):
+            ok, reason = elevate.write_with_elevation(target, b"data",
+                                                      timeout=10)
+        self.assertTrue(ok, reason)
+        self.assertEqual(target.read_bytes(), b"data")
+        self.assertIn("ctfusion-elev-", seen.get("task", ""))
+
+    def test_workdir_falls_back_when_temp_is_blocked(self):
+        import shutil
+
+        with patch("core.elevate.tempfile.mkdtemp",
+                   side_effect=PermissionError("denied")):
+            workdir = elevate._create_workdir()
+        try:
+            self.assertTrue(workdir.is_dir())
+            self.assertIn("ctfusion-elev-", workdir.name)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
 
     def test_reports_missing_source(self):
         result = self._run({

@@ -20,7 +20,7 @@ if ($actualHash -ne $expectedHash) {
     Write-Warning "bin\bkcrack.exe SHA-256 differs from the tested 1.8.1 build; packaging will continue."
 }
 
-$name = "CTFusion v2.3"
+$name = "CTFusion v2.3.1"
 $distRoot = if ($OutputRoot) {
     Join-Path $PSScriptRoot $OutputRoot
 } else {
@@ -47,6 +47,10 @@ $argsList = @(
     "--hidden-import", "PIL.PngImagePlugin",
     "--hidden-import", "PIL.JpegImagePlugin",
     "--hidden-import", "PIL.GifImagePlugin",
+    "--hidden-import", "win32com",
+    "--hidden-import", "win32com.propsys",
+    "--hidden-import", "pythoncom",
+    "--hidden-import", "pywintypes",
     "--version-file", "packaging\version_info.txt",
     "--distpath", $distRoot,
     "--workpath", (Join-Path $PSScriptRoot "build"),

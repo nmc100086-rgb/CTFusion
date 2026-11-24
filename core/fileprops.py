@@ -1,4 +1,9 @@
-"""查看文件属性：路径、大小、时间、Windows 属性、权限、类型与哈希。"""
+"""查看文件属性：路径、大小、时间、Windows 属性、权限、类型与哈希。
+
+Windows 上还会通过系统属性系统（IPropertyStore）读取资源管理器「详细信息」
+里的全部元数据：说明、来源、图像、照相机、高级照片、GPS、音频、视频、音乐、
+文档等，按属性组分组显示。
+"""
 
 from __future__ import annotations
 
@@ -77,7 +82,6 @@ def _windows_attributes(st: os.stat_result) -> list[str]:
 _EXEC_EXTS = {".exe", ".dll", ".sys", ".scr", ".com", ".bat", ".cmd",
               ".ps1", ".py", ".pyw", ".jar", ".msi"}
 
-
 def _permission_text(path: str) -> str:
     if os.name == "nt":
         # Windows 的 os.stat().st_mode 只是兼容字段，不能代表真实 ACL。
@@ -118,6 +122,192 @@ def _guess_mime(path: str, result: IdentifyResult | None) -> str:
         }
         return mapping.get(result.real_name, "")
     return ""
+
+
+_SHELL_GROUP_ORDER: tuple[str, ...] = (
+    "文件", "说明", "来源", "图像", "照相机", "高级照片",
+    "GPS", "音频", "视频", "音乐", "文档", "其他",
+)
+
+# 资源管理器的「高级照片」分组：镜头/闪光灯/EXIF 版本等。
+_ADVANCED_PHOTO_PREFIXES = (
+    "System.Photo.Lens",
+    "System.Photo.FlashManufacturer",
+    "System.Photo.FlashModel",
+    "System.Photo.ExifVersion",
+    "System.Photo.PhotometricInterpretation",
+)
+
+_MAX_SHELL_VALUE = 4000
+_MAX_SHELL_ROWS = 400
+
+_SHELL_GROUPS = {
+    "System.GPS.": "GPS",
+    "System.Image.": "图像",
+    "System.Audio.": "音频",
+    "System.Video.": "视频",
+    "System.Music.": "音乐",
+    "System.Document.": "文档",
+}
+
+_SHELL_ORIGIN_PREFIXES = (
+    "System.Author", "System.Authors", "System.Copyright", "System.Company",
+    "System.Revision", "System.LastAuthor", "System.ContentStatus",
+    "System.Language", "System.Project", "System.ApplicationName",
+)
+
+_SHELL_FILE_PREFIXES = (
+    "System.Item", "System.Size", "System.FileAttributes", "System.Offline",
+    "System.ContentType", "System.Kind", "System.ComputerName",
+    "System.Shared", "System.PerceivedType", "System.IsFolder",
+    "System.IsDeleted", "System.FileName", "System.FolderName",
+    "System.Network", "System.Date", "System.Document.Date",
+)
+
+# 资源管理器不展示的内部属性（没有本地化显示名或只是缓存/内部状态）。
+_SHELL_SKIP_NAMES = {
+    "System.Media.ClassPrimaryID",
+    "System.ExpandoProperties",
+    "System.Search.Rank",
+}
+
+
+def _shell_group(canonical: str) -> str:
+    """把 System.* 属性名映射到资源管理器的属性分组。"""
+    if canonical in ("System.Photo.DateTaken", "System.DateImported"):
+        return "来源"
+    if canonical.startswith("System.Photo."):
+        if canonical.startswith(_ADVANCED_PHOTO_PREFIXES):
+            return "高级照片"
+        return "照相机"
+    # 资源管理器把「内容创建时间 / 最后一次保存的日期」放在“文件”分组。
+    if canonical.startswith("System.Document.Date"):
+        return "文件"
+    for prefix, group in _SHELL_GROUPS.items():
+        if canonical.startswith(prefix):
+            return group
+    if canonical.startswith(("System.Title", "System.Subject",
+                             "System.Comment", "System.Rating",
+                             "System.SimpleRating", "System.Keywords",
+                             "System.Category")):
+        return "说明"
+    if canonical.startswith(_SHELL_ORIGIN_PREFIXES):
+        return "来源"
+    if canonical.startswith(_SHELL_FILE_PREFIXES):
+        return "文件"
+    return "其他"
+
+
+def _clean_shell_text(text: str) -> str:
+    """去掉 Windows 格式化结果里的方向控制字符。"""
+    for mark in ("\u200e", "\u200f", "\u202a", "\u202b",
+                 "\u202c", "\u202d", "\u202e"):
+        text = text.replace(mark, "")
+    return text.strip()
+
+
+def _format_shell_value(description, value) -> str:
+    text = ""
+    try:
+        text = description.FormatForDisplay(value, 0)
+    except Exception:
+        text = ""
+    if not text:
+        try:
+            text = value.ToString()
+        except Exception:
+            try:
+                text = str(value.GetValue())
+            except Exception:
+                return ""
+    text = _clean_shell_text(str(text))
+    if len(text) > _MAX_SHELL_VALUE:
+        text = text[:_MAX_SHELL_VALUE] + " …"
+    return text
+
+
+def shell_properties(path: str | Path,
+                     max_rows: int = _MAX_SHELL_ROWS) -> list[PropertySection]:
+    """读取 Windows 属性系统里的全部元数据，按属性组返回。
+
+    依赖 pywin32（``win32com.propsys``）。非 Windows 或组件缺失时返回空列表，
+    调用方无需特殊处理。
+    """
+    if os.name != "nt":
+        return []
+    try:
+        import pythoncom
+        from win32com.propsys import propsys
+    except ImportError:
+        return []
+
+    target = str(Path(path).expanduser().absolute())
+    initialized = False
+    try:
+        try:
+            pythoncom.CoInitialize()
+            initialized = True
+        except Exception:
+            pass
+        try:
+            store = propsys.SHGetPropertyStoreFromParsingName(target)
+        except Exception:
+            return []
+        grouped: dict[str, list[tuple[str, str]]] = {}
+        seen: set[tuple[str, str]] = set()
+        total = 0
+        for index in range(store.GetCount()):
+            if total >= max_rows:
+                break
+            try:
+                key = store.GetAt(index)
+            except Exception:
+                continue
+            try:
+                canonical = propsys.PSGetNameFromPropertyKey(key)
+            except Exception:
+                continue
+            if not canonical or canonical.startswith("System.PropGroup"):
+                continue
+            if canonical in _SHELL_SKIP_NAMES:
+                continue
+            try:
+                description = propsys.PSGetPropertyDescription(key)
+            except Exception:
+                continue
+            try:
+                display = _clean_shell_text(str(description.GetDisplayName() or ""))
+            except Exception:
+                display = ""
+            # 没有本地化显示名的属性基本是内部/缓存字段，资源管理器也不显示。
+            if not display:
+                continue
+            try:
+                value = store.GetValue(key)
+            except Exception:
+                continue
+            text = _format_shell_value(description, value)
+            if not text:
+                continue
+            group = _shell_group(canonical)
+            if (group, display) in seen:
+                continue
+            seen.add((group, display))
+            grouped.setdefault(group, []).append((display, text))
+            total += 1
+        sections: list[PropertySection] = []
+        for group in _SHELL_GROUP_ORDER:
+            rows = grouped.get(group)
+            if rows:
+                sections.append(PropertySection(f"详细属性 · {group}",
+                                                tuple(rows)))
+        return sections
+    finally:
+        if initialized:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
 
 
 def collect(path: str | Path, data: bytes | None = None,
@@ -215,6 +405,12 @@ def collect(path: str | Path, data: bytes | None = None,
         if result.matches:
             type_rows.append(("命中签名", "、".join(result.matches)))
         sections.append(PropertySection("文件类型识别", tuple(type_rows)))
+
+    # Windows 属性系统：说明/来源/图像/照相机/高级照片/GPS/音频/视频等。
+    try:
+        sections.extend(shell_properties(p))
+    except Exception:
+        pass
 
     if digest_rows is None and data is not None and compute_hashes:
         digest_rows = digests(data)

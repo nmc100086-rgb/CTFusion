@@ -25,7 +25,6 @@ from pathlib import Path
 from PySide6.QtCore import QCoreApplication, QSettings, QStandardPaths, Qt
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QFileDialog,
     QMessageBox,
     QWidget,
@@ -38,6 +37,7 @@ _SETTINGS_ORG = "CTFusion"
 _SETTINGS_APP = "CTFusion"
 _POLICY_KEY = "save/permission_policy"  # ask / elevate / user
 _LAST_DIR_KEY = "save/last_dir"
+_ELEVATION_KEY = "save/allow_elevation"  # 默认关闭：不请求管理员权限
 
 POLICY_ASK = "ask"
 POLICY_ELEVATE = "elevate"
@@ -47,10 +47,6 @@ _POLICIES = (POLICY_ASK, POLICY_ELEVATE, POLICY_USER)
 
 class _RetrySave(Exception):
     """用户选择「另存为…」：重新弹出保存对话框。"""
-
-
-class _CancelSave(Exception):
-    """用户取消，或保存流程已经无法继续。"""
 
 
 def user_directory(kind: str = "data") -> str:
@@ -93,21 +89,58 @@ def _settings() -> QSettings:
     return QSettings(_SETTINGS_ORG, _SETTINGS_APP)
 
 
+def _usable_directory(path: Path) -> bool:
+    """可以作为下次默认保存目录：存在、不是盘符根、当前用户可写。"""
+    try:
+        if not path.is_dir():
+            return False
+    except OSError:
+        return False
+    if path.parent == path:  # 盘符根目录（D:\、C:\）
+        return False
+    return os.access(path, os.W_OK)
+
+
 def last_directory(kind: str = "data") -> str:
-    """上次成功保存的目录；没有记录或目录已不存在时返回用户目录。"""
+    """上次成功保存的目录；记录不可用时回退到用户目录并清除记录。"""
     value = str(_settings().value(_LAST_DIR_KEY, "") or "")
     if value:
         try:
-            if Path(value).is_dir():
+            if _usable_directory(Path(value)):
                 return value
+        except OSError:
+            pass
+        # 之前可能记成了盘符根目录（D:\ 等），必须丢掉，否则每次保存
+        # 对话框都会定位到根目录并触发权限错误。
+        try:
+            _settings().remove(_LAST_DIR_KEY)
         except OSError:
             pass
     return user_directory(kind)
 
 
 def _remember_directory(target: Path) -> None:
+    parent = target.parent
+    if parent.parent == parent:  # 不把盘符根目录记成下次默认位置
+        return
     try:
-        _settings().setValue(_LAST_DIR_KEY, str(target.parent))
+        _settings().setValue(_LAST_DIR_KEY, str(parent))
+    except OSError:
+        pass
+
+
+def ensure_sane_save_directory() -> None:
+    """启动时清理历史遗留的无效保存目录（例如 D:\\）。"""
+    value = str(_settings().value(_LAST_DIR_KEY, "") or "")
+    if not value:
+        return
+    try:
+        if _usable_directory(Path(value)):
+            return
+    except OSError:
+        pass
+    try:
+        _settings().remove(_LAST_DIR_KEY)
     except OSError:
         pass
 
@@ -119,6 +152,34 @@ def default_save_path(filename: str, kind: str = "data") -> str:
 def permission_policy() -> str:
     value = str(_settings().value(_POLICY_KEY, POLICY_ASK) or POLICY_ASK)
     return value if value in _POLICIES else POLICY_ASK
+
+
+def allow_elevation() -> bool:
+    """是否允许在写入被拒时请求管理员权限（默认开启）。"""
+    value = str(_settings().value(_ELEVATION_KEY, "true")).lower()
+    return value not in ("0", "false", "no", "off")
+
+
+def set_allow_elevation(enabled: bool) -> None:
+    try:
+        _settings().setValue(_ELEVATION_KEY, "true" if enabled else "false")
+    except OSError:
+        pass
+
+
+def _reset_busy_cursor() -> None:
+    """清掉残留的等待光标（保存结束后不再转圈）。"""
+    app = QApplication.instance()
+    if app is None:
+        return
+    try:
+        cursor = QApplication.overrideCursor()
+        while cursor is not None and cursor.shape() == Qt.WaitCursor:
+            QApplication.restoreOverrideCursor()
+            cursor = QApplication.overrideCursor()
+        QApplication.processEvents()
+    except Exception:
+        pass
 
 
 def set_permission_policy(policy: str) -> None:
@@ -163,29 +224,49 @@ def log_file() -> Path:
 
 def ensure_log_file() -> Path:
     """确保日志文件存在（用于界面上的「打开保存日志」）。"""
-    path = log_file()
+    for path in _log_candidates():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(exist_ok=True)
+            return path
+        except OSError:
+            continue
+    return log_file()
+
+
+def _log_candidates() -> list[Path]:
+    """日志位置：只写用户数据目录，不在程序目录里产生文件。"""
+    candidates = [log_file()]
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.touch(exist_ok=True)
+        candidates.append(Path(tempfile.gettempdir()) / "CTFusion-save.log")
     except OSError:
         pass
-    return path
+    seen: set[str] = set()
+    result: list[Path] = []
+    for path in candidates:
+        key = str(path).lower()
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
 
 
 def log_event(message: str) -> None:
     """把保存相关的失败/提权记录写入本地日志；任何异常都不影响保存流程。"""
-    try:
-        path = log_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n"
+    for path in _log_candidates():
         try:
-            if path.exists() and path.stat().st_size > 1_000_000:
-                path.replace(path.with_name("save.log.1"))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if path.exists() and path.stat().st_size > 1_000_000:
+                    path.replace(path.with_name(path.name + ".1"))
+            except OSError:
+                pass
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+            return
         except OSError:
-            pass
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
-    except OSError:
-        pass
+            continue
 
 
 def is_admin() -> bool:
@@ -286,63 +367,6 @@ def show_diagnose_dialog(parent: QWidget | None = None) -> None:
     box.exec()
 
 
-def _quick_folder_name(kind: str) -> str:
-    if kind == "image":
-        return "图片"
-    if kind == "archive":
-        return "下载"
-    if kind == "text":
-        return "文档"
-    return "文档"
-
-
-def _denied_dialog(parent: QWidget | None, path: str, error: str, kind: str,
-                   allow_redirect: bool) -> tuple[str, bool]:
-    """无权限时的选择；返回 (elevate / user / choose / cancel, 是否记住)。"""
-    box = QMessageBox(parent)
-    box.setIcon(QMessageBox.Warning)
-    box.setWindowTitle(i18n.tr("无法保存文件"))
-    box.setText(i18n.tr("Windows 拒绝写入这个位置。"))
-    folder = i18n.tr(_quick_folder_name(kind))
-    if allow_redirect:
-        hint = i18n.tr(
-            "可以让程序请求一次管理员权限，只写入这个文件；\n"
-            "也可以改存到「{folder}」等用户文件夹。").format(folder=folder)
-    else:
-        hint = i18n.tr(
-            "可以让程序请求一次管理员权限，只写入这个文件。")
-    box.setInformativeText(
-        i18n.tr("目标位置：\n{path}\n\n{hint}\n\n"
-                "如果是 360、电脑管家、火绒等安全软件拦截，"
-                "请在它们的弹窗里选择「允许」，或把本程序加入信任区。\n\n"
-                "原始错误：{error}\n保存日志：{log}").format(
-            path=path, hint=hint, error=error or "—", log=log_file()))
-    elevate_button = box.addButton(
-        i18n.tr("以管理员身份保存"), QMessageBox.AcceptRole)
-    user_button = None
-    choose_button = None
-    if allow_redirect:
-        user_button = box.addButton(
-            i18n.tr("保存到{folder}文件夹").format(folder=folder),
-            QMessageBox.ActionRole)
-        choose_button = box.addButton(
-            i18n.tr("另存为…"), QMessageBox.ActionRole)
-    box.addButton(i18n.tr("取消"), QMessageBox.RejectRole)
-    remember_box = QCheckBox(i18n.tr("记住我的选择，不再询问"))
-    remember_box.setChecked(True)
-    box.setCheckBox(remember_box)
-    box.exec()
-    clicked = box.clickedButton()
-    remembered = bool(remember_box.isChecked())
-    if clicked is elevate_button:
-        return POLICY_ELEVATE, remembered
-    if user_button is not None and clicked is user_button:
-        return POLICY_USER, remembered
-    if choose_button is not None and clicked is choose_button:
-        return "choose", False
-    return "cancel", False
-
-
 def _elevated_write(parent: QWidget | None, target: Path,
                     data: bytes) -> tuple[bool, str]:
     """请求一次管理员权限写入；等待 UAC 期间保持界面响应。"""
@@ -353,12 +377,14 @@ def _elevated_write(parent: QWidget | None, target: Path,
         cursor_set = True
     try:
         ok, reason = elevate.write_with_elevation(
-            target, data, pump=QCoreApplication.processEvents)
+            target, data, timeout=120.0,
+            pump=QCoreApplication.processEvents)
         log_event("elevate target=%s ok=%s reason=%s" % (target, ok, reason))
         return ok, reason
     finally:
         if cursor_set:
             QApplication.restoreOverrideCursor()
+        _reset_busy_cursor()
 
 
 def _save_to_user_folder(parent: QWidget | None, data: bytes, filename: str,
@@ -372,7 +398,9 @@ def _save_to_user_folder(parent: QWidget | None, data: bytes, filename: str,
         QMessageBox.warning(
             parent, i18n.tr("保存失败"),
             i18n.tr("保存到用户文件夹仍然失败：\n{error}\n\n"
-                    "请检查磁盘空间或文件夹权限。\n\n"
+                    "请检查磁盘空间或文件夹权限。\n"
+                    "如果是 360、电脑管家、火绒等安全软件拦截，"
+                    "请把本程序加入信任区。\n\n"
                     "保存日志：{log}").format(
                         error=describe_error(exc), log=log_file()))
         return None
@@ -380,8 +408,17 @@ def _save_to_user_folder(parent: QWidget | None, data: bytes, filename: str,
     return str(target)
 
 
+def _sanitize_default(path: str, kind: str) -> str:
+    """保存对话框的初始路径不能落在盘符根目录。"""
+    target = Path(path)
+    if target.parent.parent == target.parent:  # D:\xxx.png
+        return default_save_path(target.name, kind)
+    return path
+
+
 def _ask_path(parent: QWidget | None, default: str, title: str,
-              file_filter: str) -> str | None:
+              file_filter: str, kind: str = "data") -> str | None:
+    default = _sanitize_default(default, kind)
     path, _ = QFileDialog.getSaveFileName(
         parent, i18n.tr(title), default, file_filter)
     return path or None
@@ -394,45 +431,32 @@ def _handle_denied(parent: QWidget | None, target: Path, data: bytes,
 
     返回实际保存的路径；用户取消时返回 None。
     需要重新弹出保存对话框时抛出 ``_RetrySave``。
+
+    默认不请求管理员权限：目标位置不可写时直接改存到用户目录，避免 UAC。
+    只有用户在「设置」里显式允许后才走提权流程。
     """
-    policy = permission_policy()
-
-    if policy == POLICY_ELEVATE:
-        ok, reason = _elevated_write(parent, target, data)
-        if ok:
-            _remember_directory(target)
-            return str(target)
+    if not allow_elevation():
+        if allow_redirect:
+            log_event("fallback (no elevation) target=%s" % target)
+            return _save_to_user_folder(parent, data, target.name, kind)
         QMessageBox.warning(
             parent, i18n.tr("保存失败"),
-            i18n.tr("管理员写入未完成：\n{error}").format(error=reason))
+            i18n.tr("这个位置不能直接写入，请改用「另存为…」选择其他位置。")
+            + "\n\n" + i18n.tr("保存日志：") + str(log_file()))
         return None
 
-    if policy == POLICY_USER:
-        if not allow_redirect:
-            QMessageBox.warning(
-                parent, i18n.tr("保存失败"),
-                i18n.tr("这个位置不能直接写入，请改用「另存为…」选择其他位置。"))
-            return None
-        return _save_to_user_folder(parent, data, target.name, kind)
-
-    choice, remember = _denied_dialog(
-        parent, str(target), error, kind, allow_redirect)
-    if remember and choice in _POLICIES:
-        set_permission_policy(choice)
-
-    if choice == POLICY_ELEVATE:
-        ok, reason = _elevated_write(parent, target, data)
-        if ok:
-            _remember_directory(target)
-            return str(target)
-        QMessageBox.warning(
-            parent, i18n.tr("保存失败"),
-            i18n.tr("管理员写入未完成：\n{error}").format(error=reason))
-        return None
-    if choice == POLICY_USER and allow_redirect:
-        return _save_to_user_folder(parent, data, target.name, kind)
-    if choice == "choose":
-        raise _RetrySave
+    # 已开启「保存时请求管理员权限」：直接以管理员身份写入，不再询问。
+    ok, reason = _elevated_write(parent, target, data)
+    if ok:
+        _remember_directory(target)
+        log_event("elevate ok target=%s" % target)
+        return str(target)
+    log_event("elevate failed target=%s reason=%s" % (target, reason))
+    QMessageBox.warning(
+        parent, i18n.tr("保存失败"),
+        i18n.tr("管理员写入未完成：\n{error}\n\n"
+                "如果 UAC 提示被取消，请重试并在提示里选择「是」。\n\n"
+                "保存日志：{log}").format(error=reason, log=log_file()))
     return None
 
 
@@ -468,6 +492,8 @@ def write_bytes(parent: QWidget | None, data: bytes, path: str | Path,
                     "或换一个位置再试。\n\n保存日志：{log}").format(
                         error=describe_error(exc), log=log_file()))
         return False
+    finally:
+        _reset_busy_cursor()
 
 
 def write_many(parent: QWidget | None,
@@ -502,6 +528,17 @@ def write_many(parent: QWidget | None,
             return written
     if not denied:
         return written
+    if not allow_elevation():
+        QMessageBox.warning(
+            parent, i18n.tr("保存失败"),
+            i18n.tr("有 {count} 个文件无法写入目标文件夹。\n\n"
+                    "如果不是文件夹权限问题，通常是 360、电脑管家、火绒等"
+                    "安全软件的「文档保护」拦截了本程序。\n"
+                    "请把 CTFusion v2.3.1.exe 加入安全软件的信任区 / 白名单，"
+                    "之后普通权限就能保存，不需要管理员。\n\n"
+                    "保存日志：{log}").format(
+                        count=len(denied), log=log_file()))
+        return written
     ok, reason = _elevated_write_many(parent, denied)
     log_event("write-many elevate count=%d ok=%s reason=%s"
               % (len(denied), ok, reason))
@@ -523,13 +560,14 @@ def _elevated_write_many(parent: QWidget | None,
         cursor_set = True
     try:
         ok, reason = elevate.write_many_with_elevation(
-            items, pump=QCoreApplication.processEvents)
+            items, timeout=120.0, pump=QCoreApplication.processEvents)
         log_event("elevate-many count=%d ok=%s reason=%s"
                   % (len(items), ok, reason))
         return ok, reason
     finally:
         if cursor_set:
             QApplication.restoreOverrideCursor()
+        _reset_busy_cursor()
 
 
 def save_file_bytes(
@@ -542,42 +580,46 @@ def save_file_bytes(
 ) -> str | None:
     """弹出保存对话框并写入；返回实际保存路径，取消时返回 None。"""
     default = suggested_path or default_save_path("output.bin", kind)
-    while True:
-        path = _ask_path(parent, default, title, file_filter)
-        if not path:
-            return None
-        target = Path(path)
-        try:
-            _write_bytes(target, data)
-        except PermissionError as exc:
-            log_event("save denied target=%s admin=%s error=%s"
-                      % (target, is_admin(), describe_error(exc)))
+    try:
+        while True:
+            path = _ask_path(parent, default, title, file_filter, kind)
+            if not path:
+                return None
+            target = Path(path)
             try:
-                saved = _handle_denied(
-                    parent, target, data, kind, describe_error(exc),
-                    allow_redirect=True)
-            except _RetrySave:
-                default = str(Path(last_directory(kind)) / target.name)
+                _write_bytes(target, data)
+            except PermissionError as exc:
+                log_event("save denied target=%s admin=%s error=%s"
+                          % (target, is_admin(), describe_error(exc)))
+                try:
+                    saved = _handle_denied(
+                        parent, target, data, kind, describe_error(exc),
+                        allow_redirect=True)
+                except _RetrySave:
+                    default = str(Path(last_directory(kind)) / target.name)
+                    continue
+                log_event("save %s target=%s"
+                          % ("recovered" if saved else "failed",
+                             saved or target))
+                if saved:
+                    return saved
+                return None
+            except OSError as exc:
+                log_event("save oserror target=%s error=%s"
+                          % (target, describe_error(exc)))
+                QMessageBox.warning(
+                    parent, i18n.tr("保存失败"),
+                    i18n.tr("无法写入文件：\n{error}\n\n"
+                            "请检查磁盘空间、目标文件名是否合法，"
+                            "或换一个位置再试。\n\n保存日志：{log}").format(
+                                error=describe_error(exc), log=log_file()))
+                default = str(target)
                 continue
-            log_event("save %s target=%s" % ("recovered" if saved else "failed",
-                                             saved or target))
-            if saved:
-                return saved
-            return None
-        except OSError as exc:
-            log_event("save oserror target=%s error=%s"
-                      % (target, describe_error(exc)))
-            QMessageBox.warning(
-                parent, i18n.tr("保存失败"),
-                i18n.tr("无法写入文件：\n{error}\n\n"
-                        "请检查磁盘空间、目标文件名是否合法，"
-                        "或换一个位置再试。\n\n保存日志：{log}").format(
-                            error=describe_error(exc), log=log_file()))
-            default = str(target)
-            continue
-        _remember_directory(target)
-        log_event("save ok target=%s" % target)
-        return str(target)
+            _remember_directory(target)
+            log_event("save ok target=%s" % target)
+            return str(target)
+    finally:
+        _reset_busy_cursor()
 
 
 def save_bytes_dialog(

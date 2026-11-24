@@ -339,7 +339,9 @@ class FilePanel(QWidget):
         layout = QVBoxLayout(page)
         bar = QHBoxLayout()
         self.props_hint = QLabel(
-            "路径、时间、Windows 属性、权限、文件类型和哈希；大文件哈希在后台分析完成后填入。")
+            "路径、时间、Windows 属性、权限、类型和哈希；"
+            "并读取系统属性处理程序提供的全部元数据"
+            "（说明 / 来源 / 图像 / 照相机 / 高级照片 / GPS / 音视频等）。")
         self.props_hint.setWordWrap(True)
         bar.addWidget(self.props_hint, 1)
         self.btn_copy_props = QPushButton("复制全部属性")
@@ -603,8 +605,9 @@ class FilePanel(QWidget):
             return
         self._props_sections = sections
         self.props_hint.setText(
-            "路径、时间、Windows 属性、权限、文件类型和哈希；"
-            "大文件哈希在后台分析完成后填入。")
+            "路径、时间、Windows 属性、权限、类型和哈希；"
+            "并读取系统属性处理程序提供的全部元数据"
+            "（说明 / 来源 / 图像 / 照相机 / 高级照片 / GPS / 音视频等）。")
         for section in sections:
             top = QTreeWidgetItem([section.title, ""])
             font = top.font(0)

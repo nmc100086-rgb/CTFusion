@@ -91,6 +91,12 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         self._active_path = ""
         self._update_running = False
+        # 旧版本可能把上次保存目录记成盘符根目录（D:\），启动时清掉，
+        # 避免保存对话框每次都定位到根目录并触发权限错误。
+        try:
+            save_utils.ensure_sane_save_directory()
+        except Exception:
+            pass
         self._update_task: _UpdateTask | None = None
         self._lang_actions: dict[str, QAction] = {}
         # 同一新版本只提示一次；同时保留内存副本，避免 QSettings 写入失败时重复提示。
@@ -634,6 +640,13 @@ class MainWindow(QMainWindow):
         properties_action.setShortcut("Alt+Return")
         properties_action.triggered.connect(self._show_file_properties)
         file_menu.addAction(properties_action)
+        paste_action = QAction("从剪贴板打开文件", self)
+        paste_action.setShortcut("Ctrl+Shift+V")
+        paste_action.setToolTip(
+            "在资源管理器里 Ctrl+C 复制文件后按 Ctrl+Shift+V 打开；"
+            "管理员模式下不能拖拽时可用")
+        paste_action.triggered.connect(self._open_from_clipboard)
+        file_menu.addAction(paste_action)
         file_menu.addSeparator()
 
         exit_action = QAction("退出", self)
@@ -672,6 +685,14 @@ class MainWindow(QMainWindow):
             "以管理员权限重新打开程序，可写入任何 Windows 允许的位置")
         admin_action.triggered.connect(self._restart_as_admin)
         settings_menu.addAction(admin_action)
+        self.elevation_action = QAction("保存时请求管理员权限", self)
+        self.elevation_action.setCheckable(True)
+        self.elevation_action.setChecked(save_utils.allow_elevation())
+        self.elevation_action.setToolTip(
+            "默认关闭：目标位置不可写时自动改存到用户目录，不弹 UAC；"
+            "打开后才会在需要时请求一次管理员权限")
+        self.elevation_action.toggled.connect(save_utils.set_allow_elevation)
+        settings_menu.addAction(self.elevation_action)
 
         help_menu = self.menuBar().addMenu("帮助")
         diagnose_action = QAction("保存权限自检…", self)
@@ -817,6 +838,29 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(updater.REPOSITORY_URL))
 
     # ---------------- 文件 ----------------
+    def _open_from_clipboard(self) -> None:
+        """从剪贴板打开文件；绕开管理员模式无法接收拖拽的限制。"""
+        clipboard = QApplication.clipboard()
+        mime = clipboard.mimeData() if clipboard is not None else None
+        paths: list[str] = []
+        if mime is not None and mime.hasUrls():
+            for url in mime.urls():
+                if url.isLocalFile():
+                    paths.append(url.toLocalFile())
+        if not paths and clipboard is not None:
+            text = clipboard.text().strip().strip('"')
+            if text and os.path.isfile(text):
+                paths.append(text)
+        if not paths:
+            QMessageBox.information(
+                self, "CTFusion",
+                "剪贴板里没有可打开的文件。\n"
+                "在资源管理器里选中文件按 Ctrl+C，"
+                "再回到这里按 Ctrl+Shift+V。")
+            return
+        for path in paths:
+            self.open_file(path)
+
     def _open_files_dialog(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "打开文件(可多选)")
         for path in paths:

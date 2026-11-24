@@ -1,6 +1,7 @@
 import ctypes
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -62,7 +63,8 @@ def _self_test() -> int:
     """Headless build check: bundled bkcrack + CRC32 inversion."""
     import zlib
 
-    from core import bkcrack, datatools, mojibake, qrcode, updater, zipcrack
+    from core import (bkcrack, datatools, fileprops, mojibake, qrcode, updater,
+                      zipcrack)
 
     info = bkcrack.bkcrack_info()
     print(f"bkcrack: {info.version or 'missing'} ({info.path})")
@@ -96,14 +98,48 @@ def _self_test() -> int:
     if not updater.check_for_update((2, 2, 0)).ignored:
         print("ERROR: update check should be ignored before v2.3")
         return 1
+    icon = resource_path("assets/CTFusion.png")
+    details = fileprops.shell_properties(icon) if icon.is_file() else []
+    print(f"Windows properties: {len(details)} sections")
+    if os.name == "nt" and not details:
+        print("ERROR: Windows property system unavailable")
+        return 1
     print(f"version: {__version__}")
     print("OK")
     return 0
 
 
+def _prepare_working_directory() -> None:
+    """把工作目录切到临时目录。
+
+    某些输入法（如搜狗）会往当前进程的工作目录写 `debug.log`；切换工作目录
+    后这类日志就不会出现在程序文件夹里。
+    """
+    try:
+        target = Path(tempfile.gettempdir())
+        if target.is_dir():
+            os.chdir(target)
+    except OSError:
+        pass
+
+
 def main() -> int:
+    _prepare_working_directory()
     if "--self-test" in sys.argv:
         return _self_test()
+    # 内部诊断：直接写一个文件，返回 0/1。用于判断保存失败是否由文件名
+    # 或安全软件引起，不创建 QApplication。
+    if "--write-probe" in sys.argv:
+        try:
+            index = sys.argv.index("--write-probe")
+            target = Path(sys.argv[index + 1])
+        except (ValueError, IndexError):
+            return 2
+        try:
+            target.write_bytes(b"ctfusion-probe")
+            return 0
+        except OSError:
+            return 1
     # 提权辅助进程：只做一次文件写入，不创建 QApplication，也不显示界面。
     # 由 ui.save_utils 在 Windows 拒绝普通写入时通过 ShellExecuteW("runas") 启动。
     from core.elevate import ELEVATED_FLAG, run_elevated_task

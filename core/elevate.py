@@ -45,6 +45,46 @@ def _result_path(workdir: Path) -> Path:
     return workdir / _RESULT_NAME
 
 
+def program_directory() -> Path:
+    """打包后是 exe 所在目录，源码运行是当前目录。"""
+    if getattr(sys, "frozen", False):
+        try:
+            return Path(sys.executable).resolve().parent
+        except OSError:
+            return Path(sys.executable).parent
+    return Path.cwd()
+
+
+def _create_workdir() -> Path:
+    """创建提权任务目录。
+
+    安全软件可能拦截本程序写 `%TEMP%`，这时退回程序目录（通常已被允许），
+    否则提权流程会在创建临时目录这一步就失败，根本走不到 UAC。
+    """
+    try:
+        return Path(tempfile.mkdtemp(prefix="ctfusion-elev-"))
+    except OSError:
+        pass
+    bases: list[Path] = []
+    for base in (program_directory(), Path.cwd()):
+        try:
+            bases.append(base)
+        except OSError:
+            continue
+    temp_env = os.environ.get("TEMP") or os.environ.get("TMP")
+    if temp_env:
+        bases.append(Path(temp_env))
+    for base in bases:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            workdir = base / f".ctfusion-elev-{os.getpid()}-{int(time.time() * 1000)}"
+            workdir.mkdir()
+            return workdir
+        except OSError:
+            continue
+    raise OSError("没有任何可写的临时目录")
+
+
 def is_admin() -> bool:
     """当前进程是否已经拥有管理员权限。"""
     if sys.platform != "win32":
@@ -171,7 +211,7 @@ def _run_task(
         return False, "没有需要写入的文件"
 
     try:
-        workdir = Path(tempfile.mkdtemp(prefix="ctfusion-elev-"))
+        workdir = _create_workdir()
     except OSError as exc:
         return False, f"无法创建临时目录：{exc}"
 

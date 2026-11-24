@@ -20,8 +20,8 @@ VSVersionInfo(
             StringStruct('FileVersion', '2.3.1.0'),
             StringStruct('InternalName', 'CTFusion'),
             StringStruct('LegalCopyright', 'bkcrack (c) kimci86, zlib license; zxing-cpp Apache-2.0; Pillow HPND'),
-            StringStruct('OriginalFilename', 'CTFusion v2.3.exe'),
-            StringStruct('ProductName', 'CTFusion v2.3'),
+            StringStruct('OriginalFilename', 'CTFusion v2.3.1.exe'),
+            StringStruct('ProductName', 'CTFusion v2.3.1'),
             StringStruct('ProductVersion', '2.3.1.0')
           ]
         )

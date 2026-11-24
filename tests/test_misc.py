@@ -217,6 +217,29 @@ class FilePropsTests(unittest.TestCase):
             rows = dict(next(s for s in sections if s.title == "路径").rows)
             self.assertEqual(rows["所在目录"], str(temp))
 
+    @unittest.skipUnless(QImage is not None, "需要安装 PySide6")
+    @unittest.skipUnless(os.name == "nt", "仅 Windows")
+    def test_shell_properties_reads_windows_metadata(self):
+        with workspace_tempdir() as temp:
+            path = temp / "meta.png"
+            image = QImage(64, 32, QImage.Format_RGB32)
+            image.fill(0x123456)
+            buffer = QBuffer()
+            buffer.open(QIODevice.WriteOnly)
+            image.save(buffer, "PNG")
+            path.write_bytes(bytes(buffer.data()))
+
+            sections = fileprops.shell_properties(path)
+            if not sections:
+                self.skipTest("当前环境没有 Windows 属性系统（缺少 pywin32）")
+            text = fileprops.sections_to_text(sections)
+            self.assertIn("详细属性", text)
+            self.assertIn("分辨率", text)
+
+            collected = fileprops.collect(path)
+            self.assertTrue(
+                any(section.title.startswith("详细属性") for section in collected))
+
 
 @unittest.skipUnless(QApplication is not None, "需要安装 PySide6")
 class MiscUiTests(unittest.TestCase):
@@ -238,6 +261,19 @@ class MiscUiTests(unittest.TestCase):
                        for i in range(self.window.file_panel.tabs.count())]
         self.assertIn("文件属性", file_labels)
         self.assertEqual(self.window.misc_panel.tabs.count(), 3)
+
+    def test_open_files_from_clipboard(self):
+        from PySide6.QtCore import QMimeData, QUrl
+
+        with workspace_tempdir() as temp:
+            path = temp / "clip.txt"
+            path.write_text("flag{clipboard}", encoding="utf-8")
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(str(path))])
+            QGuiApplication.clipboard().setMimeData(mime)
+            self.window._open_from_clipboard()
+            self.assertEqual(self.window._active_path, str(path))
+            self.assertEqual(self.window.file_bar.count(), 1)
 
     @unittest.skipUnless(qrcode.available(), "需要 zxing-cpp 和 Pillow")
     def test_qr_tab_load_and_copy(self):

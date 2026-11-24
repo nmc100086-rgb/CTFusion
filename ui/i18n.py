@@ -109,6 +109,12 @@ _EN: dict[str, str] = {
     "记住我的选择，不再询问": "Remember my choice and do not ask again",
     "管理员写入未完成：\n{error}":
         "The administrator write did not complete:\n{error}",
+    "管理员写入未完成：\n{error}\n\n"
+    "如果 UAC 提示被取消，请重试并在提示里选择「是」。\n\n"
+    "保存日志：{log}":
+        "The administrator write did not complete:\n{error}\n\n"
+        "If the UAC prompt was cancelled, retry and choose “Yes”.\n\n"
+        "Save log: {log}",
     "这个位置不能直接写入，请改用「另存为…」选择其他位置。":
         "This location cannot be written directly. Use “Save As…” to choose "
         "another location.",
@@ -136,9 +142,39 @@ _EN: dict[str, str] = {
     "保存未完成：已取消，或目标位置不能写入。可以换一个位置重试。":
         "Save was not completed: it was cancelled, or the location cannot be "
         "written. Try another location.",
-    # 保存诊断 / 管理员模式（v2.3.1）
+    # 保存诊断 / 管理员模式（v2.3）
     "保存权限自检": "Save Permission Check",
-    "保存权限自检…": "Save Permission Check…",
+    "从剪贴板打开文件": "Open Files from Clipboard",
+    "在资源管理器里 Ctrl+C 复制文件后按 Ctrl+Shift+V 打开；"
+    "管理员模式下不能拖拽时可用":
+        "Copy files in Explorer with Ctrl+C, then press Ctrl+Shift+V here; "
+        "use this when drag-and-drop is unavailable in administrator mode.",
+    "剪贴板里没有可打开的文件。\n"
+    "在资源管理器里选中文件按 Ctrl+C，再回到这里按 Ctrl+Shift+V。":
+        "The clipboard does not contain a file.\n"
+        "Select files in Explorer, press Ctrl+C, then press Ctrl+Shift+V here.",
+    "保存时请求管理员权限": "Ask for administrator rights when saving",
+    "默认关闭：目标位置不可写时自动改存到用户目录，不弹 UAC；"
+    "打开后才会在需要时请求一次管理员权限":
+        "Off by default: when the target folder is not writable, save into "
+        "the user folder without UAC; enable it to request administrator "
+        "rights when needed.",
+    "有 {count} 个文件无法写入目标文件夹。\n\n"
+    "如果不是文件夹权限问题，通常是 360、电脑管家、火绒等"
+    "安全软件的「文档保护」拦截了本程序。\n"
+    "请把 CTFusion v2.3.1.exe 加入安全软件的信任区 / 白名单，"
+    "之后普通权限就能保存，不需要管理员。\n\n"
+    "保存日志：{log}":
+        "{count} files could not be written to the target folder.\n\n"
+        "If this is not a folder permission issue, security software such as "
+        "360, PC Manager or Huorong is blocking this app via its document "
+        "protection.\nAdd CTFusion v2.3.1.exe to that software's trust list; "
+        "after that, saving works with normal rights and no administrator is "
+        "needed.\n\nSave log: {log}",
+    "有 {count} 个文件无法写入目标文件夹（权限不足）。\n"
+    "请换一个可写目录后再试。":
+        "{count} files could not be written to the target folder "
+        "(permission denied).\nChoose a writable folder and try again.",    "保存权限自检…": "Save Permission Check…",
     "打开保存日志": "Open Save Log",
     "以管理员身份重新启动": "Restart as Administrator",
     "以管理员权限重新打开程序，可写入任何 Windows 允许的位置":
@@ -509,6 +545,11 @@ _EN: dict[str, str] = {
     "路径、时间、Windows 属性、权限、文件类型和哈希；大文件哈希在后台分析完成后填入。":
         "Path, timestamps, Windows attributes, permissions, file type and hashes; "
         "large-file hashes appear after background analysis.",
+    "路径、时间、Windows 属性、权限、类型和哈希；并读取系统属性处理程序提供的全部元数据（说明 / 来源 / 图像 / 照相机 / 高级照片 / GPS / 音视频等）。":
+        "Path, times, Windows attributes, permissions, type and hashes; also "
+        "reads all metadata exposed by the Windows property handlers "
+        "(Description / Origin / Image / Camera / Advanced photo / GPS / "
+        "Audio / Video, etc.).",
     "遍历 R/G/B/A 通道顺序,提取 LSB 文本;flag 行会排在最前并高亮。":
         "Scan R/G/B/A channel orders and extract LSB text; flag lines are shown first and highlighted.",
     "熵图(越高越接近加密/压缩)":
